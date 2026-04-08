@@ -239,8 +239,8 @@ with tab1:
         "Prom/día","Dur. prom (min)","Dur. mín","Dur. máx","Secciones"
     ]
     tbl_styled = (tbl.style
-        .applymap(color_prod, subset=["Prom/día"])
-        .applymap(color_dur,  subset=["Dur. prom (min)"])
+        .map(color_prod, subset=["Prom/día"])
+        .map(color_dur,  subset=["Dur. prom (min)"])
         .format({"Prom/día": "{:.1f}", "Dur. prom (min)": "{:.1f}",
                  "Dur. mín": "{:.1f}", "Dur. máx": "{:.1f}"})
         .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
