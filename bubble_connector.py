@@ -1,157 +1,252 @@
 """
-CEOP – Conector Bubble API
-Encuesta de Inducción Guerrero
-
-Requiere en .streamlit/secrets.toml:
-    BUBBLE_API_TOKEN = "tu-private-key"
-    BUBBLE_BASE_URL  = "https://encuestaopguerrero.bubbleapps.io/version-test"
+CEOP · bubble_connector.py
+Carga paginada desde la Data API de Bubble con caché TTL.
+Uso:
+    from bubble_connector import get_encuestas
+    df = get_encuestas(api_key="...", municipios=["ACAPULCO DE JUAREZ"])
 """
+import json
+import time
+import logging
+from datetime import datetime, timezone
 
 import requests
 import pandas as pd
 import streamlit as st
-from datetime import datetime
 
-# ── Configuración ──────────────────────────────────────────────────────────────
-DATATYPE   = "encuesta"   # tipo de dato en Bubble (minúsculas en Data API)
-CACHE_TTL  = 600          # segundos (10 min)
-PAGE_LIMIT = 100          # máximo por página en Bubble
+from config import (
+    BUBBLE_ENDPOINT, BUBBLE_PAGE_SIZE,
+    CACHE_TTL_SEC, FIELD_MAP, CAMPOS_EXCLUIR,
+)
 
+logger = logging.getLogger(__name__)
 
-# ── Columnas — nombres exactos del diccionario de variables ───────────────────
-# Punto único de verdad: si Bubble cambia un nombre, solo se edita aquí.
+# ── Paginación y carga bruta ───────────────────────────────────────────────────
 
-COL_ENCUESTADOR     = "nombre_encuestador"
-COL_MUNICIPIO       = "municipio"
-COL_SECCION         = "seccion_electoral"
-
-COL_P1              = "p1_amlo"
-COL_P2              = "p2_claudia"
-COL_P3              = "p3_programas_bienestar"
-COL_P4              = "p4_delegado_bienestar"
-COL_P5              = "p5_conoce_ivan_hernandez"
-COL_P6              = "p6_opinion_ivan_hernandez"
-COL_P7              = "p7_cercania_ivan_hernandez"
-COL_P8              = "p8_valores_4t"
-COL_P9              = "p9_votaria_ivan_hernandez"
-COL_P10             = "p10_frase"
-COL_P11_OPCION      = "p11_prioridad_opcion"
-COL_P11_OTRA        = "p11_prioridad_otra"
-
-COL_EDAD            = "edad"
-COL_SEXO            = "sexo"
-COL_NIVEL_EDU       = "nivel_educativo"
-COL_BIENESTAR       = "recibe_programas_bienestar"
-
-COL_FECHA           = "Created Date"    # campo automático de Bubble
-COL_ID              = "_id"             # campo automático de Bubble
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _headers() -> dict:
-    return {
-        "Authorization": f"Bearer {st.secrets['BUBBLE_API_TOKEN']}",
-        "Content-Type":  "application/json",
+def _fetch_all_raw(api_key: str) -> list[dict]:
+    """
+    Descarga todos los registros de Bubble usando paginación por cursor.
+    Filtra en origen:
+      - estatus_encuesta == 'Terminada'
+      - Created Date >= 2026-04-18 (inicio oficial del operativo)
+    Retorna lista de dicts tal como vienen de la API (campos Bubble).
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    constraints = json.dumps([
+        {
+            "key":              "estatus_encuesta",
+            "constraint_type": "equals",
+            "value":           "Terminada",
+        },
+        {
+            "key":              "Created Date",
+            "constraint_type": "greater than",
+            "value":           "2026-04-17T23:59:59.000Z",  # desde 18 abril 2026 — inicio oficial del operativo
+        },
+    ])
+    params   = {
+        "limit":       BUBBLE_PAGE_SIZE,
+        "cursor":      0,
+        "constraints": constraints,
     }
-
-
-def _base_url() -> str:
-    base = st.secrets["BUBBLE_BASE_URL"].rstrip("/")
-    return f"{base}/api/1.1/obj/{DATATYPE}"
-
-
-# ── Carga con paginación automática ───────────────────────────────────────────
-
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_bubble_data() -> pd.DataFrame:
-    """
-    Descarga todos los registros paginando automáticamente (100 por request).
-    Devuelve DataFrame con los campos tal como los nombra Bubble.
-    """
-    all_results = []
-    cursor      = 0
+    results  = []
+    intentos = 0
+    max_intentos = 3
 
     while True:
-        response = requests.get(
-            _base_url(),
-            headers=_headers(),
-            params={"cursor": cursor, "limit": PAGE_LIMIT},
-            timeout=15,
-        )
+        try:
+            resp = requests.get(
+                BUBBLE_ENDPOINT, headers=headers, params=params, timeout=15
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            intentos += 1
+            if intentos >= max_intentos:
+                logger.error("Bubble API error tras %d intentos: %s", max_intentos, e)
+                raise
+            time.sleep(2 ** intentos)  # back-off exponencial
+            continue
 
-        if response.status_code != 200:
-            st.error(f"Error Bubble — HTTP {response.status_code}: {response.text[:200]}")
+        data      = resp.json().get("response", {})
+        chunk     = data.get("results", [])
+        remaining = data.get("remaining", 0)
+        results.extend(chunk)
+
+        if remaining == 0:
             break
+        params["cursor"] += len(chunk)
 
-        page      = response.json().get("response", {})
-        results   = page.get("results", [])
-        remaining = page.get("remaining", 0)
+    return results
 
-        all_results.extend(results)
 
-        if remaining == 0 or not results:
-            break
+# ── Transformación y limpieza ──────────────────────────────────────────────────
 
-        cursor += len(results)
+def _transform(records: list[dict]) -> pd.DataFrame:
+    """
+    Aplica FIELD_MAP, excluye campos PII, deriva duracion_min,
+    normaliza fechas y tipos.
+    """
+    rows = []
+    for r in records:
+        row = {}
+        for bubble_key, app_key in FIELD_MAP.items():
+            row[app_key] = r.get(bubble_key)           # None si campo ausente
+        rows.append(row)
 
-    if not all_results:
-        return pd.DataFrame()
+    df = pd.DataFrame(rows)
 
-    df = pd.DataFrame(all_results)
+    # Fechas
+    for col in ("fecha_inicio", "fecha_fin"):
+        df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
 
-    # Coerciones de tipo
-    if COL_FECHA in df.columns:
-        df[COL_FECHA] = pd.to_datetime(df[COL_FECHA], errors="coerce").dt.date
-    if COL_EDAD in df.columns:
-        df[COL_EDAD] = pd.to_numeric(df[COL_EDAD], errors="coerce")
-    if COL_SECCION in df.columns:
-        df[COL_SECCION] = pd.to_numeric(df[COL_SECCION], errors="coerce").astype("Int64")
+    # Duración derivada (Modified - Created) en minutos, redondeada a 1 decimal
+    df["duracion_min"] = (
+        (df["fecha_fin"] - df["fecha_inicio"])
+        .dt.total_seconds()
+        .div(60)
+        .round(1)
+    )
+
+    # Fecha de campo = solo la parte date de fecha_inicio (hora local MX)
+    df["fecha"] = df["fecha_inicio"].dt.tz_convert("America/Mexico_City").dt.date
+
+    # Sección electoral → int (puede ser None/NaN)
+    df["seccion"] = pd.to_numeric(df["seccion"], errors="coerce").astype("Int64")
+
+    # Edad → int
+    df["edad"] = pd.to_numeric(df["edad"], errors="coerce").astype("Int64")
+
+    # Municipio → mayúsculas y strip (normalizar vs. MUNICIPIOS dict)
+    df["municipio"] = df["municipio"].str.strip().str.upper()
+
+    # ID interno de encuestador (hash del nombre, hasta tener usuarios reales)
+    df["encuestador_id"] = df["encuestador_nombre"].apply(
+        lambda x: str(abs(hash(str(x)))) if pd.notna(x) else "sin_nombre"
+    )
+
+    # Columnas P11 → booleano: tiene valor = True
+    p11_cols = [
+        "p11_programas_sociales", "p11_empleo", "p11_seguridad",
+        "p11_educacion", "p11_salud", "p11_infraestructura", "p11_otra",
+    ]
+    for col in p11_cols:
+        if col in df.columns:
+            df[col] = df[col].notna() & (df[col] != "")
 
     return df
 
 
-# ── Carga segura con fallback ─────────────────────────────────────────────────
+# ── Caché con TTL usando st.session_state ──────────────────────────────────────
 
-def load_data() -> tuple[pd.DataFrame, str]:
-    """
-    Llama a fetch_bubble_data() con manejo de errores y fallback.
+def _cache_key(municipios: list[str] | None) -> str:
+    key = ",".join(sorted(municipios)) if municipios else "_todos_"
+    return f"bubble_cache_{key}"
 
-    Returns:
-        (DataFrame, mensaje_estado)
-        mensaje_estado es "" si todo fue bien.
+def _cache_ts_key(municipios: list[str] | None) -> str:
+    return _cache_key(municipios) + "_ts"
+
+def _cache_valid(municipios: list[str] | None) -> bool:
+    ts = st.session_state.get(_cache_ts_key(municipios))
+    if ts is None:
+        return False
+    return (time.time() - ts) < CACHE_TTL_SEC
+
+
+# ── Función pública ────────────────────────────────────────────────────────────
+
+def get_encuestas(
+    api_key: str,
+    municipios: list[str] | None = None,
+    force_refresh: bool = False,
+) -> tuple[pd.DataFrame, datetime | None]:
     """
-    CACHE_KEY = "ceop_last_df"
-    TS_KEY    = "ceop_last_ts"
+    Retorna (df, ultima_actualizacion).
+
+    Parámetros
+    ----------
+    api_key       : Bearer token de la Data API de Bubble.
+    municipios    : Lista de nombres de municipio (tal como aparecen en Bubble,
+                    ej. ['ACAPULCO DE JUAREZ']). None = todos.
+    force_refresh : Ignora el caché y recarga desde la API.
+
+    Retorna
+    -------
+    df                  : DataFrame con todos los registros terminados.
+    ultima_actualizacion: datetime UTC de la última carga exitosa, o None.
+    """
+    ck = _cache_key(municipios)
+    tk = _cache_ts_key(municipios)
+
+    if not force_refresh and _cache_valid(municipios):
+        return st.session_state[ck], _ts_to_dt(st.session_state[tk])
 
     try:
-        df = fetch_bubble_data()
+        raw = _fetch_all_raw(api_key)
+        df  = _transform(raw)
 
-        if df.empty:
-            return df, "⚠️ La API respondió pero no hay registros disponibles."
+        if municipios:
+            munis_upper = [m.strip().upper() for m in municipios]
+            df = df[df["municipio"].isin(munis_upper)].copy()
 
-        st.session_state[CACHE_KEY] = df
-        st.session_state[TS_KEY]    = datetime.now().strftime("%d/%m/%Y %H:%M")
-        return df, ""
+        ts = time.time()
+        st.session_state[ck] = df
+        st.session_state[tk] = ts
+        return df, _ts_to_dt(ts)
 
-    except requests.ConnectionError:
-        msg = "Sin conexión — no se pudo alcanzar Bubble."
-    except requests.Timeout:
-        msg = "Bubble no respondió en 15 s (timeout)."
     except Exception as e:
-        msg = f"Error inesperado: {e}"
-
-    fallback = st.session_state.get(CACHE_KEY)
-    last_ts  = st.session_state.get(TS_KEY, "hora desconocida")
-
-    if fallback is not None:
-        return fallback, f"⚠️ {msg} Mostrando datos al {last_ts}."
-
-    return pd.DataFrame(), f"🔴 {msg} Sin datos previos disponibles."
+        logger.warning("No se pudo actualizar desde Bubble: %s. Usando caché.", e)
+        cached = st.session_state.get(ck)
+        ts     = st.session_state.get(tk)
+        if cached is not None:
+            return cached, _ts_to_dt(ts)
+        # Sin caché ni datos: DataFrame vacío con columnas correctas
+        return pd.DataFrame(columns=list(FIELD_MAP.values()) + ["duracion_min", "fecha", "encuestador_id"]), None
 
 
-# ── Invalidar caché ───────────────────────────────────────────────────────────
+def _ts_to_dt(ts: float | None) -> datetime | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
 
-def invalidate_cache():
-    """Fuerza recarga desde Bubble en el próximo render."""
-    fetch_bubble_data.clear()
+
+# ── Script de prueba (ejecutar directamente desde terminal) ───────────────────
+if __name__ == "__main__":
+    import sys
+    import os
+
+    API_KEY = os.getenv("BUBBLE_API_KEY", "3e40b6cbea8e733fe3e6ac89f1f796b5")
+
+    print("Conectando a Bubble...")
+    raw = _fetch_all_raw(API_KEY)
+    print(f"Registros descargados (estatus=Terminada): {len(raw)}")
+
+    if raw:
+        print("\nCampos en el primer registro:")
+        for k, v in raw[0].items():
+            print(f"  {k!r:35s} → {str(v)[:60]}")
+
+    # Simular transform sin Streamlit
+    import types
+    mock_ss = {}
+    class MockSS:
+        def get(self, k, d=None): return mock_ss.get(k, d)
+        def __setitem__(self, k, v): mock_ss[k] = v
+        def __getitem__(self, k): return mock_ss[k]
+
+    import bubble_connector as bc
+    _orig = bc.st
+    bc.st = types.SimpleNamespace(session_state=MockSS())
+
+    df, ts = bc.get_encuestas(API_KEY)
+    print(f"\nDataFrame generado: {df.shape[0]} filas × {df.shape[1]} columnas")
+    print("\nColumnas:", df.columns.tolist())
+    print("\nMunicipios encontrados:", df["municipio"].unique().tolist())
+    print("\nDuración promedio:", df["duracion_min"].mean().round(2), "min")
+    print("\nEstatus (todos deben ser Terminada):", df["estatus"].unique().tolist())
+
+    if "p8_valores_4t" in df.columns:
+        print("\n⚠️  Valores únicos de p8_valores_4t (verificar bug P8/P10):")
+        print(df["p8_valores_4t"].value_counts().to_string())
+
+    bc.st = _orig
+    print("\n✅ Prueba completada.")
