@@ -3,4 +3,6 @@ pandas>=2.2.3
 plotly>=5.24.0
 folium>=0.18.0
 streamlit-folium>=0.23.0
-numpy>=2.0.0streamlit-authenticator==0.3.3
+numpy>=2.0.0
+requests>=2.32.0
+streamlit-authenticator==0.4.2
