@@ -416,13 +416,21 @@ with tab1:
             df[df["coordinador"].notna()]
             .groupby("coordinador")
             .agg(
-                total      =("folio",      "count"),
-                terminadas =("terminada",  "sum"),
-                secciones  =("seccion",    "nunique"),
+                total        =("folio",             "count"),
+                terminadas   =("terminada",          "sum"),
+                secciones    =("seccion",            "nunique"),
                 encuestadores=("encuestador_nombre", "nunique"),
-                municipios =("municipio",  lambda x: ", ".join(sorted(x.dropna().unique()))),
             ).reset_index()
         )
+        # Municipios por coordinador — calculado por separado para evitar problemas con sorted+None
+        muni_por_coord = (
+            df[df["coordinador"].notna()]
+            .groupby("coordinador")["municipio"]
+            .apply(lambda x: ", ".join(sorted([str(v) for v in x.dropna().unique()])))
+            .reset_index()
+            .rename(columns={"municipio": "municipios"})
+        )
+        coord_resumen = coord_resumen.merge(muni_por_coord, on="coordinador", how="left")
         coord_resumen["terminadas"]  = coord_resumen["terminadas"].astype(int)
         coord_resumen["pct_complet"] = (coord_resumen["terminadas"] / coord_resumen["total"] * 100).round(1)
         coord_resumen = coord_resumen.sort_values("total", ascending=False).reset_index(drop=True)
