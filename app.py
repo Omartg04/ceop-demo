@@ -356,12 +356,15 @@ st.markdown(f"""
 
 
 # ── KPIs globales ──────────────────────────────────────────────────────────────
-total      = len(df)
-n_enc      = df["encuestador_id"].nunique()
-dias       = df["fecha"].nunique()
-prom_dia   = round(total / max(dias * max(n_enc, 1), 1), 1)
-prom_t     = round(df["duracion_min"].mean(), 1) if total else 0
-secs_cub   = df["seccion"].dropna().nunique()
+total       = len(df)
+terminadas  = int(df["terminada"].sum()) if "terminada" in df.columns else total
+n_enc       = df["encuestador_id"].nunique()
+dias        = df["fecha"].nunique()
+prom_dia    = round(total / max(dias * max(n_enc, 1), 1), 1)
+# Duración promedio solo sobre registros con timestamp confiable
+df_conf     = df[df["duracion_confiable"]] if "duracion_confiable" in df.columns else df
+prom_t      = round(df_conf["duracion_min"].mean(), 1) if len(df_conf) else 0
+secs_cub    = df["seccion"].dropna().nunique()
 
 # Total secciones del municipio seleccionado (o suma estatal)
 if muni_sel != "Todos los municipios":
@@ -374,13 +377,19 @@ else:
 
 pct_cobert = round(secs_cub / max(total_secs, 1) * 100, 1)
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-kpi(c1, f"{total:,}",     "Encuestas levantadas",   f"{dias} días de campo")
-kpi(c2, n_enc,            "Encuestadores activos",   f"de {df_raw['encuestador_id'].nunique()} total", "azul")
-kpi(c3, f"{prom_dia}",    "Promedio diario",         f"meta: {META_DIA}/enc/día", "azul")
-kpi(c4, f"{prom_t}'",     "Duración promedio",       f"rango: {DUR_MIN_MIN}–{DUR_MAX_MIN} min")
-kpi(c5, f"{secs_cub}",    "Secciones cubiertas",     f"de {total_secs} en el territorio", "naranja")
-kpi(c6, f"{pct_cobert}%", "Cobertura territorial",   f"{total_secs - secs_cub} secciones pendientes", "naranja")
+# Fila 1 — Volumen y calidad
+r1c1, r1c2, r1c3, _ = st.columns([1, 1, 1, 1])
+kpi(r1c1, f"{total:,}",      "Encuestas levantadas",  f"{dias} días de campo")
+kpi(r1c2, f"{terminadas:,}", "Encuestas terminadas",  f"{round(terminadas/max(total,1)*100,1)}% · completaron todo el cuestionario", "azul")
+kpi(r1c3, f"~{n_enc}",       "Encuestadores activos ⚠️", "nombre libre — puede incluir duplicados", "azul")
+
+st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
+
+# Fila 2 — Territorio y tiempo
+r2c1, r2c2, r2c3, _ = st.columns([1, 1, 1, 1])
+kpi(r2c1, f"{prom_t}'",      "Duración promedio",     f"rango esperado: {DUR_MIN_MIN}–{DUR_MAX_MIN} min")
+kpi(r2c2, f"{secs_cub}",     "Secciones cubiertas",   f"de {total_secs} en el territorio", "naranja")
+kpi(r2c3, f"{pct_cobert}%",  "Cobertura territorial", f"{total_secs - secs_cub} secciones pendientes", "naranja")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -402,126 +411,171 @@ with tab1:
     if total == 0:
         st.info("Sin registros para los filtros seleccionados.")
     else:
-        resumen = (
-            df.groupby(["encuestador_id", "encuestador_nombre"])
+        # ── Resumen por coordinador (fuente confiable) ───────────────────────
+        coord_resumen = (
+            df[df["coordinador"].notna()]
+            .groupby("coordinador")
             .agg(
-                total          =("folio",         "count"),
-                dias_activo    =("fecha",          "nunique"),
-                dur_prom       =("duracion_min",   "mean"),
-                dur_min        =("duracion_min",   "min"),
-                dur_max        =("duracion_min",   "max"),
-                secciones      =("seccion",        "nunique"),
-                municipios     =("municipio",      "nunique"),
-                municipios_lista=("municipio",     lambda x: x.dropna().unique().tolist()),
+                total      =("folio",      "count"),
+                terminadas =("terminada",  "sum"),
+                secciones  =("seccion",    "nunique"),
+                encuestadores=("encuestador_nombre", "nunique"),
+                municipios =("municipio",  lambda x: ", ".join(sorted(x.dropna().unique()))),
             ).reset_index()
         )
-        resumen["prom_dia"]  = (resumen["total"] / resumen["dias_activo"]).round(1)
-        resumen["dur_prom"]  = pd.to_numeric(resumen["dur_prom"], errors="coerce").round(1)
-        # Coordinador — desde Bubble si disponible, fallback al diccionario
-        if bubble_tiene_coordinador and "coordinador" in df.columns:
-            coord_map = (df.groupby("encuestador_id")["coordinador"]
-                         .agg(lambda x: x.dropna().mode()[0] if not x.dropna().empty else "Sin asignar")
-                         .to_dict())
-            resumen["coordinador"] = resumen["encuestador_id"].map(coord_map).fillna("Sin asignar")
-        else:
-            # Fallback: si un municipio tiene un solo coordinador úsalo,
-            # si tiene varios marca como "Ver Bubble"
-            def coord_desde_config(munis):
-                if not munis:
-                    return "Sin asignar"
-                coords = COORDINADORES.get(munis[0], ["Sin asignar"])
-                return coords[0] if len(coords) == 1 else "Múltiple"
-            resumen["coordinador"] = resumen["municipios_lista"].apply(coord_desde_config)
+        coord_resumen["terminadas"]  = coord_resumen["terminadas"].astype(int)
+        coord_resumen["pct_complet"] = (coord_resumen["terminadas"] / coord_resumen["total"] * 100).round(1)
+        coord_resumen = coord_resumen.sort_values("total", ascending=False).reset_index(drop=True)
 
-        # Meta total = días activo × META_DIA
-        resumen["meta"]      = resumen["dias_activo"] * META_DIA
-        resumen["pct_meta"]  = (resumen["total"] / resumen["meta"] * 100).round(1)
-
-        # Distrito predominante por encuestador
-        def distrito_predominante(enc_id):
-            secs = df[df["encuestador_id"] == enc_id]["seccion"].dropna()
-            if secs.empty: return "—"
-            distritos = secs.map(lambda s: SECCION_DISTRITO.get(int(s), None)).dropna()
-            if distritos.empty: return "—"
-            moda = distritos.mode()
-            return f"D{int(moda.iloc[0])}" if len(moda) == 1 else f"D{int(moda.iloc[0])}+"
-        resumen["distrito"] = resumen["encuestador_id"].apply(distrito_predominante)
-
-        resumen = resumen.sort_values("pct_meta", ascending=False).reset_index(drop=True)
-
-        # ── Semáforo rápido ────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">Semáforo de desempeño — equipo completo</div>',
+        st.markdown('<div class="sec-title">Resumen por coordinador</div>',
                     unsafe_allow_html=True)
 
-        n_verde    = (resumen["pct_meta"] >= 100).sum()
-        n_amarillo = ((resumen["pct_meta"] >= 75) & (resumen["pct_meta"] < 100)).sum()
-        n_rojo     = (resumen["pct_meta"] < 75).sum()
-
-        m1, m2, m3, _ = st.columns([1, 1, 1, 3])
-        m1.metric("🟢 En meta",   int(n_verde),    help=f"≥ 100% de meta ({META_DIA} enc/día)")
-        m2.metric("🟡 En riesgo", int(n_amarillo), help="75–99% de meta")
-        m3.metric("🔴 Bajo meta", int(n_rojo),     help="< 75% de meta")
-
-        def color_pct(val):
-            if val >= 100: return "background-color:#D4EDDA;color:#155724;font-weight:600"
-            if val >= 75:  return "background-color:#FFF3CD;color:#856404;font-weight:600"
+        def color_complet(val):
+            if val >= 95:  return "background-color:#D4EDDA;color:#155724;font-weight:600"
+            if val >= 85:  return "background-color:#FFF3CD;color:#856404;font-weight:600"
             return                "background-color:#F8D7DA;color:#721C24;font-weight:600"
 
-        tbl = resumen[[
-            "encuestador_nombre", "coordinador", "distrito", "total", "meta", "pct_meta",
-            "dur_prom", "dias_activo", "secciones"
+        tbl_coord = coord_resumen[[
+            "coordinador", "municipios", "encuestadores",
+            "total", "terminadas", "pct_complet", "secciones"
         ]].copy()
-        tbl.columns = [
-            "Encuestador", "Coordinador", "Distrito", "Enc. levantadas", "Meta", "% Meta",
-            "Dur. prom (min)", "Días activo", "Secciones"
+        tbl_coord.columns = [
+            "Coordinador", "Municipios", "Encuestadores (aprox.)",
+            "Levantadas", "Terminadas", "% Complet.", "Secciones"
         ]
-        tbl_styled = (tbl.style
-            .map(color_pct, subset=["% Meta"])
-            .map(color_dur,  subset=["Dur. prom (min)"])
-            .format({"% Meta": "{:.1f}%", "Dur. prom (min)": "{:.1f}"})
+        tbl_coord_styled = (tbl_coord.style
+            .map(color_complet, subset=["% Complet."])
+            .format({"% Complet.": "{:.1f}%"})
             .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
         )
-        st.dataframe(tbl_styled, use_container_width=True, hide_index=True, height=360)
-        st.caption(
-            f"🟢 En meta: ≥100% · Meta = días activo × {META_DIA} enc/día   "
-            f"🟡 En riesgo: 75–99%   🔴 Bajo meta: <75%   "
-            f"· Duración esperada: {DUR_MIN_MIN}–{DUR_MAX_MIN} min"
-        )
+        st.dataframe(tbl_coord_styled, use_container_width=True, hide_index=True,
+                     height=min(80 + len(coord_resumen) * 35, 320))
+        st.caption("🟢 ≥95% completitud · 🟡 85–94% · 🔴 <85%  "
+                   "· 'Encuestadores (aprox.)' cuenta variantes de nombre — puede estar sobreestimado.")
 
-        # ── Distribuciones ─────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">Distribución estadística del equipo</div>',
-                    unsafe_allow_html=True)
-        d1, d2 = st.columns(2)
-
-        with d1:
-            fig = px.histogram(
-                resumen, x="prom_dia", nbins=max(len(resumen), 5),
-                color_discrete_sequence=[AZUL_L],
-                labels={"prom_dia": "Encuestas promedio / día"},
-                title="Productividad diaria — distribución del equipo",
+        # ── Detalle por encuestador (colapsado) ───────────────────────────────
+        with st.expander("📋 Ver detalle por encuestador", expanded=False):
+            st.caption(
+                "⚠️ El nombre del encuestador es texto libre en Bubble. "
+                "Si un encuestador usa variantes de su nombre, sus registros aparecerán "
+                "en filas separadas y las métricas individuales estarán subestimadas. "
+                "Usa la tabla de coordinadores como referencia principal."
             )
-            fig.add_vline(x=META_DIA, line_dash="dash", line_color=VERDE,
-                          annotation_text=f"Meta ({META_DIA})", annotation_position="top right")
-            fig.add_vline(x=UMBRAL_AMARILLO, line_dash="dot", line_color=ROJO,
-                          annotation_text=f"Mínimo ({UMBRAL_AMARILLO})", annotation_position="top left")
-            fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                              font_family="IBM Plex Sans", margin=dict(t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
 
-        with d2:
-            fig2 = px.box(
-                df, y="duracion_min",
-                color_discrete_sequence=[VERDE],
-                labels={"duracion_min": "Minutos"},
-                title="Duración de entrevistas — distribución completa",
+            resumen = (
+                df.groupby(["encuestador_id", "encuestador_nombre"])
+                .agg(
+                    total          =("folio",         "count"),
+                    terminadas     =("terminada",      "sum"),
+                    dias_activo    =("fecha",          "nunique"),
+                    dur_prom       =("duracion_min",   "mean"),
+                    secciones      =("seccion",        "nunique"),
+                    municipios_lista=("municipio",     lambda x: x.dropna().unique().tolist()),
+                ).reset_index()
             )
-            fig2.add_hline(y=DUR_MAX_MIN, line_dash="dash", line_color=AMARILLO,
-                           annotation_text=f"Máx recomendado ({DUR_MAX_MIN} min)")
-            fig2.add_hline(y=DUR_MIN_MIN, line_dash="dot",  line_color=ROJO,
-                           annotation_text=f"Mín recomendado ({DUR_MIN_MIN} min)")
-            fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                               font_family="IBM Plex Sans", margin=dict(t=50, b=10))
-            st.plotly_chart(fig2, use_container_width=True)
+            resumen["prom_dia"]   = (resumen["total"] / resumen["dias_activo"]).round(1)
+            resumen["dur_prom"]   = pd.to_numeric(resumen["dur_prom"], errors="coerce").round(1)
+            resumen["terminadas"] = resumen["terminadas"].astype(int)
+            resumen["pct_complet"]= (resumen["terminadas"] / resumen["total"] * 100).round(1)
+
+            if bubble_tiene_coordinador and "coordinador" in df.columns:
+                coord_map = (df.groupby("encuestador_id")["coordinador"]
+                             .agg(lambda x: x.dropna().mode()[0] if not x.dropna().empty else "Sin asignar")
+                             .to_dict())
+                resumen["coordinador"] = resumen["encuestador_id"].map(coord_map).fillna("Sin asignar")
+            else:
+                def coord_desde_config(munis):
+                    if not munis: return "Sin asignar"
+                    coords = COORDINADORES.get(munis[0], ["Sin asignar"])
+                    return coords[0] if len(coords) == 1 else "Múltiple"
+                resumen["coordinador"] = resumen["municipios_lista"].apply(coord_desde_config)
+
+            resumen["meta"]     = resumen["dias_activo"] * META_DIA
+            resumen["pct_meta"] = (resumen["total"] / resumen["meta"] * 100).round(1)
+
+            def distrito_predominante(enc_id):
+                secs = df[df["encuestador_id"] == enc_id]["seccion"].dropna()
+                if secs.empty: return "—"
+                distritos = secs.map(lambda s: SECCION_DISTRITO.get(int(s), None)).dropna()
+                if distritos.empty: return "—"
+                moda = distritos.mode()
+                return f"D{int(moda.iloc[0])}" if len(moda) == 1 else f"D{int(moda.iloc[0])}+"
+            resumen["distrito"] = resumen["encuestador_id"].apply(distrito_predominante)
+
+            resumen = resumen.sort_values("pct_meta", ascending=False).reset_index(drop=True)
+
+            n_verde    = (resumen["pct_meta"] >= 100).sum()
+            n_amarillo = ((resumen["pct_meta"] >= 75) & (resumen["pct_meta"] < 100)).sum()
+            n_rojo     = (resumen["pct_meta"] < 75).sum()
+
+            m1, m2, m3, _ = st.columns([1, 1, 1, 3])
+            m1.metric("🟢 En meta",   int(n_verde),    help=f"≥ 100% de meta ({META_DIA} enc/día)")
+            m2.metric("🟡 En riesgo", int(n_amarillo), help="75–99% de meta")
+            m3.metric("🔴 Bajo meta", int(n_rojo),     help="< 75% de meta")
+
+            def color_pct(val):
+                if val >= 100: return "background-color:#D4EDDA;color:#155724;font-weight:600"
+                if val >= 75:  return "background-color:#FFF3CD;color:#856404;font-weight:600"
+                return                "background-color:#F8D7DA;color:#721C24;font-weight:600"
+
+            tbl = resumen[[
+                "encuestador_nombre", "coordinador", "distrito",
+                "total", "terminadas", "pct_complet",
+                "meta", "pct_meta", "dur_prom", "dias_activo", "secciones"
+            ]].copy()
+            tbl.columns = [
+                "Encuestador", "Coordinador", "Distrito",
+                "Levantadas", "Terminadas", "% Complet.",
+                "Meta", "% Meta", "Dur. prom (min)", "Días activo", "Secciones"
+            ]
+            tbl_styled = (tbl.style
+                .map(color_pct,     subset=["% Meta"])
+                .map(color_complet, subset=["% Complet."])
+                .map(color_dur,     subset=["Dur. prom (min)"])
+                .format({"% Meta": "{:.1f}%", "% Complet.": "{:.1f}%", "Dur. prom (min)": "{:.1f}"})
+                .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
+            )
+            st.dataframe(tbl_styled, use_container_width=True, hide_index=True, height=360)
+            st.caption(
+                f"🟢 En meta: ≥100% · Meta = días activo × {META_DIA} enc/día   "
+                f"🟡 En riesgo: 75–99%   🔴 Bajo meta: <75%   "
+                f"· Duración esperada: {DUR_MIN_MIN}–{DUR_MAX_MIN} min"
+            )
+
+            st.markdown('<div class="sec-title">Distribución estadística del equipo</div>',
+                        unsafe_allow_html=True)
+            d1, d2 = st.columns(2)
+
+            with d1:
+                fig = px.histogram(
+                    resumen, x="prom_dia", nbins=max(len(resumen), 5),
+                    color_discrete_sequence=[AZUL_L],
+                    labels={"prom_dia": "Encuestas promedio / día"},
+                    title="Productividad diaria — distribución del equipo",
+                )
+                fig.add_vline(x=META_DIA, line_dash="dash", line_color=VERDE,
+                              annotation_text=f"Meta ({META_DIA})", annotation_position="top right")
+                fig.add_vline(x=UMBRAL_AMARILLO, line_dash="dot", line_color=ROJO,
+                              annotation_text=f"Mínimo ({UMBRAL_AMARILLO})", annotation_position="top left")
+                fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                  font_family="IBM Plex Sans", margin=dict(t=50, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+
+            with d2:
+                df_conf_plot = df[df["duracion_confiable"]] if "duracion_confiable" in df.columns else df
+                fig2 = px.box(
+                    df_conf_plot, y="duracion_min",
+                    color_discrete_sequence=[VERDE],
+                    labels={"duracion_min": "Minutos"},
+                    title="Duración de entrevistas — solo timestamps confiables",
+                )
+                fig2.add_hline(y=DUR_MAX_MIN, line_dash="dash", line_color=AMARILLO,
+                               annotation_text=f"Máx recomendado ({DUR_MAX_MIN} min)")
+                fig2.add_hline(y=DUR_MIN_MIN, line_dash="dot",  line_color=ROJO,
+                               annotation_text=f"Mín recomendado ({DUR_MIN_MIN} min)")
+                fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                   font_family="IBM Plex Sans", margin=dict(t=50, b=10))
+                st.plotly_chart(fig2, use_container_width=True)
 
         # ── Ficha individual ───────────────────────────────────────────────────
         st.markdown('<div class="sec-title">Ficha individual de encuestador</div>',
@@ -930,9 +984,30 @@ with tab4:
                 st.plotly_chart(fig_p11, use_container_width=True)
                 st.caption("Porcentaje sobre total de encuestas. Respuesta múltiple — la suma puede superar 100%.")
 
+        # ── Datos de contacto capturados ──────────────────────────────────────
+        st.markdown('<div class="sec-title">Datos de contacto capturados</div>',
+                    unsafe_allow_html=True)
+
+        df_term      = df[df["terminada"]] if "terminada" in df.columns else df
+        n_term       = len(df_term)
+        n_cel        = int(df_term["tiene_celular"].sum()) if "tiene_celular" in df_term.columns else 0
+        n_cor        = int(df_term["tiene_correo"].sum())  if "tiene_correo"  in df_term.columns else 0
+        pct_cel      = round(n_cel / max(n_term, 1) * 100, 1)
+        pct_cor      = round(n_cor / max(n_term, 1) * 100, 1)
+
+        ct1, ct2, _ = st.columns([1, 1, 2])
+        kpi(ct1, f"{n_cel:,}", "Celulares capturados",
+            f"{pct_cel}% de {n_term:,} enc. terminadas")
+        kpi(ct2, f"{n_cor:,}", "Correos capturados",
+            f"{pct_cor}% de {n_term:,} enc. terminadas", "azul")
+
         # ── Descarga ───────────────────────────────────────────────────────────
         st.markdown("---")
-        csv_out = df.to_csv(index=False).encode("utf-8")
+        # Excluir PII y columnas internas antes de exportar
+        cols_excluir_csv = {"tiene_celular", "tiene_correo", "terminada",
+                            "duracion_confiable", "fecha_inicio", "fecha_fin"}
+        cols_csv = [c for c in df.columns if c not in cols_excluir_csv]
+        csv_out = df[cols_csv].to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇️ Descargar datos filtrados (CSV)", csv_out,
             f"ceop_guerrero_{muni_sel.lower().replace(' ','_')}.csv", "text/csv"

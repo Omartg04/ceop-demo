@@ -34,11 +34,6 @@ def _fetch_all_raw(api_key: str) -> list[dict]:
     headers = {"Authorization": f"Bearer {api_key}"}
     constraints = json.dumps([
         {
-            "key":              "estatus_encuesta",
-            "constraint_type": "equals",
-            "value":           "Terminada",
-        },
-        {
             "key":              "Created Date",
             "constraint_type": "greater than",
             "value":           "2026-04-17T23:59:59.000Z",  # desde 18 abril 2026 — inicio oficial del operativo
@@ -91,6 +86,9 @@ def _transform(records: list[dict]) -> pd.DataFrame:
         row = {}
         for bubble_key, app_key in FIELD_MAP.items():
             row[app_key] = r.get(bubble_key)           # None si campo ausente
+        # Campos de contacto como booleanos — PII nunca sale del transform
+        row["tiene_celular"] = bool(r.get("celular_encuestado"))
+        row["tiene_correo"]  = bool(r.get("email_encuestado"))
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -110,11 +108,27 @@ def _transform(records: list[dict]) -> pd.DataFrame:
     # Fecha de campo = solo la parte date de fecha_inicio (hora local MX)
     df["fecha"] = df["fecha_inicio"].dt.tz_convert("America/Mexico_City").dt.date
 
+    # Excluir registros anteriores al inicio oficial del operativo (18 abril 2026).
+    # El registro del 17 abril es una prueba que se coló — no pertenece al levantamiento.
+    INICIO_OPERATIVO = pd.Timestamp("2026-04-18").date()
+    df = df[df["fecha"] >= INICIO_OPERATIVO].copy()
+
+    # duracion_confiable: False para el batch manual subido el 19 de abril.
+    # Esos 565 registros fueron capturados en vivo el 18 pero subidos un día después,
+    # por lo que sus timestamps no reflejan la duración real de la entrevista.
+    # Se excluyen del semáforo de duración pero se mantienen en todos los demás conteos.
+    FECHA_BATCH_MANUAL = pd.Timestamp("2026-04-19").date()
+    df["duracion_confiable"] = df["fecha"] != FECHA_BATCH_MANUAL
+
     # Sección electoral → int (puede ser None/NaN)
     df["seccion"] = pd.to_numeric(df["seccion"], errors="coerce").astype("Int64")
 
     # Edad → int
     df["edad"] = pd.to_numeric(df["edad"], errors="coerce").astype("Int64")
+
+    # Encuesta terminada — columna booleana derivada del estatus
+    # Se usa como indicador de completitud; el filtro operativo ya no está en origen.
+    df["terminada"] = df["estatus"].astype(str).str.strip() == "Terminada"
 
     # Municipio → mayúsculas y strip (normalizar vs. MUNICIPIOS dict)
     df["municipio"] = df["municipio"].str.strip().str.upper()
@@ -242,11 +256,49 @@ if __name__ == "__main__":
     print("\nColumnas:", df.columns.tolist())
     print("\nMunicipios encontrados:", df["municipio"].unique().tolist())
     print("\nDuración promedio:", df["duracion_min"].mean().round(2), "min")
-    print("\nEstatus (todos deben ser Terminada):", df["estatus"].unique().tolist())
+
+    # ── Desglose de estatus ────────────────────────────────────────────────────
+    total      = len(df)
+    terminadas = df["terminada"].sum()
+    iniciadas  = total - terminadas
+    print(f"\n── Estatus ──────────────────────────────")
+    print(f"  Total levantadas : {total}")
+    print(f"  Terminadas       : {terminadas}  ({terminadas/total*100:.1f}% del total)" if total else "  Sin registros")
+    print(f"  Iniciadas        : {iniciadas}")
+    print(f"  Valores únicos   : {df['estatus'].unique().tolist()}")
+
+    # ── Datos de contacto (sobre terminadas) ──────────────────────────────────
+    df_t = df[df["terminada"]]
+    n_t  = len(df_t)
+    if n_t:
+        cel = df_t["tiene_celular"].sum()
+        cor = df_t["tiene_correo"].sum()
+        print(f"\n── Contacto (sobre {n_t} terminadas) ────")
+        print(f"  Con celular : {cel}  ({cel/n_t*100:.1f}%)")
+        print(f"  Con correo  : {cor}  ({cor/n_t*100:.1f}%)")
+    else:
+        print("\n  Sin encuestas terminadas para calcular contacto.")
 
     if "p8_valores_4t" in df.columns:
         print("\n⚠️  Valores únicos de p8_valores_4t (verificar bug P8/P10):")
         print(df["p8_valores_4t"].value_counts().to_string())
+
+    # ── Distribución de duraciones (solo timestamps confiables) ───────────────
+    df_conf  = df[df["terminada"] & df["duracion_confiable"]]
+    df_batch = df[df["terminada"] & ~df["duracion_confiable"]]
+    print(f"\n── Duraciones (terminadas con timestamp confiable: {len(df_conf)}) ──")
+    if len(df_conf):
+        print(df_conf["duracion_min"].describe().round(1))
+        bins   = [-1, 0, 2, 5, 10, 20, 30, 60, 9999]
+        labels = ["negativa","0-2 min","2-5 min","5-10 min","10-20 min","20-30 min","30-60 min",">60 min"]
+        print(df_conf["duracion_min"].pipe(
+            lambda s: pd.cut(s, bins=bins, labels=labels).value_counts().sort_index()
+        ))
+    print(f"\n── Batch manual excluido del semáforo: {len(df_batch)} registros ──")
+
+    # ── Registros por fecha de campo ──────────────────────────────────────────
+    print("\n── Registros por fecha de campo ─────────────────")
+    print(df[df["terminada"]]["fecha"].value_counts().sort_index())
 
     bc.st = _orig
     print("\n✅ Prueba completada.")
