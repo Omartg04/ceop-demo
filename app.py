@@ -23,10 +23,10 @@ from config import (
     META_DIA, UMBRAL_AMARILLO, DUR_MIN_MIN, DUR_MAX_MIN,
     META_POR_SECCION, AUTO_REFRESH_SEC, MUNICIPIOS, ESTADO_CENTRO,
     ESTADO_ZOOM, OPCIONES, COORDINADORES, MUNICIPIOS_POR_COORDINADOR,
-    TODOS_COORDINADORES, ROLES,
+    TODOS_COORDINADORES, ROLES, semana_operativo,
 )
 from seccion_distrito_lookup import SECCION_DISTRITO, DISTRITOS_POR_MUNICIPIO
-from bubble_connector import get_encuestas
+from bubble_connector import get_encuestas, normalizar_nombre
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -242,7 +242,14 @@ with st.sidebar:
         coord_sel = "Todos los coordinadores"   # municipales: cartera ya restringida en df_raw
 
     # ── Municipio ──────────────────────────────────────────────────────────────
-    if coord_sel == "Todos los coordinadores":
+    # Para roles municipales: el universo de municipios SIEMPRE está limitado
+    # a _munis_permitidos — no puede expandirse vía filtro de coordinador.
+    if _rol == "municipal":
+        munis_con_datos = sorted([
+            m for m in df_raw["municipio"].dropna().unique()
+            if m in _munis_permitidos
+        ])
+    elif coord_sel == "Todos los coordinadores":
         munis_con_datos = sorted(df_raw["municipio"].dropna().unique().tolist())
     else:
         if bubble_tiene_coordinador:
@@ -276,7 +283,7 @@ with st.sidebar:
     else:
         dist_sel = "Todos los distritos"
 
-    # ── Rango de fechas ────────────────────────────────────────────────────────
+    # ── Filtro temporal — tres modos ───────────────────────────────────────────
     if not df_raw.empty and "fecha" in df_raw.columns:
         fechas_disp = sorted(df_raw["fecha"].dropna().unique())
         f_min = fechas_disp[0]
@@ -284,8 +291,51 @@ with st.sidebar:
     else:
         f_min = f_max = date.today()
 
-    rango = st.date_input("Rango de fechas", value=(f_min, f_max),
-                          min_value=f_min, max_value=f_max)
+    import datetime as _dt_sb
+
+    def _inicio_semana_sb(d):
+        dow = d.isoweekday()
+        if dow == 6:
+            return d
+        dias_atras = (dow % 7) + 1 if dow != 7 else 1
+        return d - _dt_sb.timedelta(days=dias_atras)
+
+    modo_tiempo = st.radio(
+        "Vista temporal",
+        ["📅 Día", "📆 Semana", "📊 Acumulado"],
+        index=1,
+        key="modo_tiempo",
+    )
+
+    if modo_tiempo == "📅 Día":
+        dia_sel = st.date_input(
+            "Fecha",
+            value=f_max,
+            min_value=f_min,
+            max_value=f_max,
+            key="dia_sel",
+        )
+        f_ini_global = dia_sel
+        f_fin_global = dia_sel
+
+    elif modo_tiempo == "📆 Semana":
+        semanas_sb = sorted(set(_inicio_semana_sb(f) for f in fechas_disp), reverse=True)
+        semana_sb_sel = st.selectbox(
+            "Semana operativa",
+            options=semanas_sb,
+            format_func=lambda d: (
+                f"{d.strftime('%d %b')} – "
+                f"{(d + _dt_sb.timedelta(days=6)).strftime('%d %b %Y')}"
+            ),
+            key="semana_sb_sel",
+        )
+        f_ini_global = semana_sb_sel
+        f_fin_global = semana_sb_sel + _dt_sb.timedelta(days=6)
+
+    else:  # Acumulado
+        st.caption(f"Operativo completo: {f_min.strftime('%d %b')} – {f_max.strftime('%d %b %Y')}")
+        f_ini_global = f_min
+        f_fin_global = f_max
 
     # ── Encuestador ────────────────────────────────────────────────────────────
     df_muni = df_raw if muni_sel == "Todos los municipios" \
@@ -312,7 +362,7 @@ with st.sidebar:
 
 
 # ── Aplicar filtros ────────────────────────────────────────────────────────────
-f_ini, f_fin = (rango[0], rango[-1]) if len(rango) == 2 else (rango[0], rango[0])
+f_ini, f_fin = f_ini_global, f_fin_global
 
 df = df_raw.copy()
 
@@ -395,36 +445,113 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈  Desempeño de Brigada",
-    "🗺️  Mapa de Cobertura",
-    "👤  Perfil de Entrevistados",
-    "📊  Resultados del Instrumento",
-])
+# ── Tabs — visibilidad por rol ──────────────────────────────────────────────────
+# Rol estatal  : Tab 1, 2, 3, 4, 5
+# Rol municipal: Tab 1, 2 únicamente — Tab 3, 4 y 5 no se renderizan
+if _rol == "estatal":
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈  Desempeño de Brigada",
+        "🗺️  Mapa de Cobertura",
+        "👤  Perfil de Entrevistados",
+        "📊  Resultados del Instrumento",
+        "📉  Evolución Semanal",
+    ])
+else:
+    tab1, tab2 = st.tabs([
+        "📈  Desempeño de Brigada",
+        "🗺️  Mapa de Cobertura",
+    ])
+    # Placeholders para que el resto del código no falle con referencias a tab3/tab4/tab5
+    tab3 = None
+    tab4 = None
+    tab5 = None
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 – DESEMPEÑO
+# TAB 1 – DESEMPEÑO  (semáforo semanal)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
+
+    import datetime as _dt
+
+    # ── Umbrales semanales ────────────────────────────────────────────────────
+    META_SEMANAL  = 20   # encuestas/semana objetivo
+    AMARILLO_MIN  = 13   # mínimo para semáforo amarillo
+
+    # ── Semana operativa: sábado → viernes ───────────────────────────────────
+    def inicio_semana_op(fecha):
+        """Devuelve el sábado que abre la semana operativa de `fecha`.
+        isoweekday: Lun=1 … Sáb=6, Dom=7
+        """
+        dow = fecha.isoweekday()
+        if dow == 6:
+            return fecha          # ya es sábado
+        # Días desde el sábado anterior:
+        # Dom=7→1, Lun=1→2, Mar=2→3, Mié=3→4, Jue=4→5, Vie=5→6
+        dias_atras = (dow % 7) + 1 if dow != 7 else 1
+        return fecha - _dt.timedelta(days=dias_atras)
+
+    # ── Abreviaturas de días activos ──────────────────────────────────────────
+    ABREV_DIA = {1: "L", 2: "M", 3: "X", 4: "J", 5: "V", 6: "S", 7: "D"}
+
+    def dias_activos_str(fechas):
+        """Ej.: [sábado, lunes, miércoles] → 'S · L · X'"""
+        dow_unicos = sorted(set(f.isoweekday() for f in fechas))
+        return " · ".join(ABREV_DIA[d] for d in dow_unicos)
+
+    # ── Funciones de semáforo ─────────────────────────────────────────────────
+    def sem_semanal(n):
+        if n >= META_SEMANAL: return "verde"
+        if n >= AMARILLO_MIN: return "amarillo"
+        return "rojo"
+
+    def color_semanal(val):
+        s = sem_semanal(val)
+        if s == "verde":    return "background-color:#D4EDDA;color:#155724;font-weight:700"
+        if s == "amarillo": return "background-color:#FFF3CD;color:#856404;font-weight:700"
+        return                     "background-color:#F8D7DA;color:#721C24;font-weight:700"
+
+    def color_complet(val):
+        if val >= 95: return "background-color:#D4EDDA;color:#155724;font-weight:600"
+        if val >= 85: return "background-color:#FFF3CD;color:#856404;font-weight:600"
+        return               "background-color:#F8D7DA;color:#721C24;font-weight:600"
 
     if total == 0:
         st.info("Sin registros para los filtros seleccionados.")
     else:
-        # ── Resumen por coordinador (fuente confiable) ───────────────────────
+        # ── Filtro de coordinador por rol ─────────────────────────────────────
+        if _rol == "municipal" and bubble_tiene_coordinador:
+            _nombre_coord = normalizar_nombre(st.session_state.get("name", ""))
+            df_t1 = df[df["coordinador"].apply(normalizar_nombre) == _nombre_coord].copy()
+            if df_t1.empty:
+                st.warning(
+                    f"No se encontraron registros con coordinador "
+                    f"**'{_nombre_coord}'** en Bubble. "
+                    "Verifica que el campo `coordinador` esté capturado correctamente. "
+                    "Mostrando todos los registros del municipio como respaldo."
+                )
+                df_t1 = df.copy()
+        else:
+            df_t1 = df.copy()
+
+        # ── Añadir semana operativa al dataframe ──────────────────────────────
+        df_t1 = df_t1.copy()
+        df_t1["semana_op"] = df_t1["fecha"].apply(inicio_semana_op)
+
+        # ── Resumen por coordinador (fuente confiable — sin cambios) ──────────
         coord_resumen = (
-            df[df["coordinador"].notna()]
+            df_t1[df_t1["coordinador"].notna()]
             .groupby("coordinador")
             .agg(
-                total        =("folio",             "count"),
-                terminadas   =("terminada",          "sum"),
-                secciones    =("seccion",            "nunique"),
-                encuestadores=("encuestador_nombre", "nunique"),
+                total         =("folio",             "count"),
+                terminadas    =("terminada",          "sum"),
+                secciones     =("seccion",            "nunique"),
+                encuestadores =("encuestador_nombre", "nunique"),
             ).reset_index()
         )
-        # Municipios por coordinador — calculado por separado para evitar problemas con sorted+None
         muni_por_coord = (
-            df[df["coordinador"].notna()]
+            df_t1[df_t1["coordinador"].notna()]
             .groupby("coordinador")["municipio"]
             .apply(lambda x: ", ".join(sorted([str(v) for v in x.dropna().unique()])))
             .reset_index()
@@ -437,11 +564,6 @@ with tab1:
 
         st.markdown('<div class="sec-title">Resumen por coordinador</div>',
                     unsafe_allow_html=True)
-
-        def color_complet(val):
-            if val >= 95:  return "background-color:#D4EDDA;color:#155724;font-weight:600"
-            if val >= 85:  return "background-color:#FFF3CD;color:#856404;font-weight:600"
-            return                "background-color:#F8D7DA;color:#721C24;font-weight:600"
 
         tbl_coord = coord_resumen[[
             "coordinador", "municipios", "encuestadores",
@@ -461,145 +583,193 @@ with tab1:
         st.caption("🟢 ≥95% completitud · 🟡 85–94% · 🔴 <85%  "
                    "· 'Encuestadores (aprox.)' cuenta variantes de nombre — puede estar sobreestimado.")
 
-        # ── Detalle por encuestador (colapsado) ───────────────────────────────
-        with st.expander("📋 Ver detalle por encuestador", expanded=False):
-            st.caption(
-                "⚠️ El nombre del encuestador es texto libre en Bubble. "
-                "Si un encuestador usa variantes de su nombre, sus registros aparecerán "
-                "en filas separadas y las métricas individuales estarán subestimadas. "
-                "Usa la tabla de coordinadores como referencia principal."
+        # ══════════════════════════════════════════════════════════════════════
+        # SEMÁFORO SEMANAL — núcleo del nuevo Tab 1
+        # ══════════════════════════════════════════════════════════════════════
+        st.markdown('<div class="sec-title">Semáforo semanal por encuestador</div>',
+                    unsafe_allow_html=True)
+
+        # Selector de semana
+        semanas_disponibles = sorted(df_t1["semana_op"].unique(), reverse=True)
+        sw_col, _, _ = st.columns([2, 2, 2])
+        with sw_col:
+            semana_sel = st.selectbox(
+                "Semana operativa (inicio sábado)",
+                options=semanas_disponibles,
+                format_func=lambda d: (
+                    f"Sem. {d.strftime('%d %b')} – "
+                    f"{(d + _dt.timedelta(days=6)).strftime('%d %b %Y')}"
+                ),
+                key="semana_sel_tab1",
             )
 
-            resumen = (
-                df.groupby(["encuestador_id", "encuestador_nombre"])
-                .agg(
-                    total          =("folio",         "count"),
-                    terminadas     =("terminada",      "sum"),
-                    dias_activo    =("fecha",          "nunique"),
-                    dur_prom       =("duracion_min",   "mean"),
-                    secciones      =("seccion",        "nunique"),
-                    municipios_lista=("municipio",     lambda x: x.dropna().unique().tolist()),
-                ).reset_index()
-            )
-            resumen["prom_dia"]   = (resumen["total"] / resumen["dias_activo"]).round(1)
-            resumen["dur_prom"]   = pd.to_numeric(resumen["dur_prom"], errors="coerce").round(1)
-            resumen["terminadas"] = resumen["terminadas"].astype(int)
-            resumen["pct_complet"]= (resumen["terminadas"] / resumen["total"] * 100).round(1)
+        df_sem = df_t1[df_t1["semana_op"] == semana_sel]
 
-            if bubble_tiene_coordinador and "coordinador" in df.columns:
-                coord_map = (df.groupby("encuestador_id")["coordinador"]
-                             .agg(lambda x: x.dropna().mode()[0] if not x.dropna().empty else "Sin asignar")
-                             .to_dict())
-                resumen["coordinador"] = resumen["encuestador_id"].map(coord_map).fillna("Sin asignar")
-            else:
-                def coord_desde_config(munis):
-                    if not munis: return "Sin asignar"
-                    coords = COORDINADORES.get(munis[0], ["Sin asignar"])
-                    return coords[0] if len(coords) == 1 else "Múltiple"
-                resumen["coordinador"] = resumen["municipios_lista"].apply(coord_desde_config)
+        # Agregar por encuestador para la semana seleccionada
+        grp_sem = df_sem.groupby(["encuestador_id", "encuestador_nombre"])
+        resumen_sem = grp_sem.agg(
+            enc_semana  =("folio",        "count"),
+            terminadas  =("terminada",    "sum"),
+            dur_prom    =("duracion_min", "mean"),
+            secciones   =("seccion",      "nunique"),
+            ultima_act  =("fecha",        "max"),
+        ).reset_index()
 
-            resumen["meta"]     = resumen["dias_activo"] * META_DIA
-            resumen["pct_meta"] = (resumen["total"] / resumen["meta"] * 100).round(1)
+        # Días activos como string (S · L · X …)
+        fechas_por_enc = df_sem.groupby("encuestador_id")["fecha"].apply(list)
+        resumen_sem["dias_activos"] = resumen_sem["encuestador_id"].map(
+            lambda eid: dias_activos_str(fechas_por_enc.get(eid, []))
+        )
 
-            def distrito_predominante(enc_id):
-                secs = df[df["encuestador_id"] == enc_id]["seccion"].dropna()
-                if secs.empty: return "—"
-                distritos = secs.map(lambda s: SECCION_DISTRITO.get(int(s), None)).dropna()
-                if distritos.empty: return "—"
-                moda = distritos.mode()
-                return f"D{int(moda.iloc[0])}" if len(moda) == 1 else f"D{int(moda.iloc[0])}+"
-            resumen["distrito"] = resumen["encuestador_id"].apply(distrito_predominante)
+        resumen_sem["dur_prom"]   = pd.to_numeric(resumen_sem["dur_prom"], errors="coerce").round(1)
+        resumen_sem["terminadas"] = resumen_sem["terminadas"].astype(int)
+        resumen_sem["pct_complet"]= (resumen_sem["terminadas"] / resumen_sem["enc_semana"] * 100).round(1)
+        resumen_sem["_sem"]       = resumen_sem["enc_semana"].apply(sem_semanal)
 
-            resumen = resumen.sort_values("pct_meta", ascending=False).reset_index(drop=True)
+        # Orden: verde → amarillo → rojo, dentro de cada grupo por enc_semana desc
+        _orden_sem = {"verde": 0, "amarillo": 1, "rojo": 2}
+        resumen_sem = resumen_sem.sort_values(
+            ["_sem", "enc_semana"],
+            key=lambda col: col.map(_orden_sem) if col.name == "_sem" else col,
+            ascending=[True, False],
+        ).reset_index(drop=True)
 
-            n_verde    = (resumen["pct_meta"] >= 100).sum()
-            n_amarillo = ((resumen["pct_meta"] >= 75) & (resumen["pct_meta"] < 100)).sum()
-            n_rojo     = (resumen["pct_meta"] < 75).sum()
+        # KPIs rápidos del semáforo
+        n_verde    = (resumen_sem["_sem"] == "verde").sum()
+        n_amarillo = (resumen_sem["_sem"] == "amarillo").sum()
+        n_rojo     = (resumen_sem["_sem"] == "rojo").sum()
 
-            m1, m2, m3, _ = st.columns([1, 1, 1, 3])
-            m1.metric("🟢 En meta",   int(n_verde),    help=f"≥ 100% de meta ({META_DIA} enc/día)")
-            m2.metric("🟡 En riesgo", int(n_amarillo), help="75–99% de meta")
-            m3.metric("🔴 Bajo meta", int(n_rojo),     help="< 75% de meta")
+        m1, m2, m3, _ = st.columns([1, 1, 1, 3])
+        m1.metric("🟢 Cumplieron meta",  int(n_verde),
+                  help=f"≥ {META_SEMANAL} encuestas esta semana")
+        m2.metric("🟡 En progreso",      int(n_amarillo),
+                  help=f"{AMARILLO_MIN}–{META_SEMANAL - 1} encuestas esta semana")
+        m3.metric("🔴 Bajo meta",        int(n_rojo),
+                  help=f"< {AMARILLO_MIN} encuestas esta semana")
 
-            def color_pct(val):
-                if val >= 100: return "background-color:#D4EDDA;color:#155724;font-weight:600"
-                if val >= 75:  return "background-color:#FFF3CD;color:#856404;font-weight:600"
-                return                "background-color:#F8D7DA;color:#721C24;font-weight:600"
+        # Tabla semáforo semanal
+        resumen_sem["meta"]     = META_SEMANAL
+        resumen_sem["pct_meta"] = (resumen_sem["enc_semana"] / META_SEMANAL * 100).round(1)
 
-            tbl = resumen[[
-                "encuestador_nombre", "coordinador", "distrito",
-                "total", "terminadas", "pct_complet",
-                "meta", "pct_meta", "dur_prom", "dias_activo", "secciones"
-            ]].copy()
-            tbl.columns = [
-                "Encuestador", "Coordinador", "Distrito",
-                "Levantadas", "Terminadas", "% Complet.",
-                "Meta", "% Meta", "Dur. prom (min)", "Días activo", "Secciones"
-            ]
-            tbl_styled = (tbl.style
-                .map(color_pct,     subset=["% Meta"])
-                .map(color_complet, subset=["% Complet."])
-                .map(color_dur,     subset=["Dur. prom (min)"])
-                .format({"% Meta": "{:.1f}%", "% Complet.": "{:.1f}%", "Dur. prom (min)": "{:.1f}"})
-                .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
-            )
-            st.dataframe(tbl_styled, use_container_width=True, hide_index=True, height=360)
-            st.caption(
-                f"🟢 En meta: ≥100% · Meta = días activo × {META_DIA} enc/día   "
-                f"🟡 En riesgo: 75–99%   🔴 Bajo meta: <75%   "
-                f"· Duración esperada: {DUR_MIN_MIN}–{DUR_MAX_MIN} min"
-            )
+        tbl_sem = resumen_sem[[
+            "encuestador_nombre", "enc_semana", "meta", "pct_meta",
+            "dias_activos", "pct_complet", "dur_prom", "secciones", "ultima_act",
+        ]].copy()
+        tbl_sem.columns = [
+            "Encuestador", "Enc. semana", "Meta", "% Meta",
+            "Días activos", "% Complet.", "Dur. prom (min)", "Secciones", "Última actividad",
+        ]
 
-            st.markdown('<div class="sec-title">Distribución estadística del equipo</div>',
-                        unsafe_allow_html=True)
+        def color_pct_meta(val):
+            if val >= 100: return "background-color:#D4EDDA;color:#155724;font-weight:700"
+            if val >= 65:  return "background-color:#FFF3CD;color:#856404;font-weight:700"
+            return               "background-color:#F8D7DA;color:#721C24;font-weight:700"
+
+        tbl_sem_styled = (
+            tbl_sem.style
+            .map(color_semanal,  subset=["Enc. semana"])
+            .map(color_pct_meta, subset=["% Meta"])
+            .map(color_complet,  subset=["% Complet."])
+            .map(color_dur,      subset=["Dur. prom (min)"])
+            .format({
+                "Enc. semana":     "{:.0f}",
+                "Meta":            "{:.0f}",
+                "% Meta":          "{:.1f}%",
+                "% Complet.":      "{:.1f}%",
+                "Dur. prom (min)": "{:.1f}",
+            })
+            .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
+        )
+        st.dataframe(tbl_sem_styled, use_container_width=True, hide_index=True,
+                     height=min(80 + len(resumen_sem) * 35, 460))
+        st.caption(
+            f"🟢 ≥100% de meta ({META_SEMANAL} enc/semana)   "
+            f"🟡 65–99%   🔴 <65%   "
+            "· Días: S=Sábado L=Lunes M=Martes X=Miércoles J=Jueves V=Viernes D=Domingo"
+        )
+
+        # ── Distribuciones del equipo (semana seleccionada) ───────────────────
+        with st.expander("📊 Ver distribuciones del equipo — semana seleccionada", expanded=False):
             d1, d2 = st.columns(2)
 
             with d1:
-                fig = px.histogram(
-                    resumen, x="prom_dia", nbins=max(len(resumen), 5),
+                fig_hist = px.histogram(
+                    resumen_sem, x="enc_semana", nbins=max(len(resumen_sem), 5),
                     color_discrete_sequence=[AZUL_L],
-                    labels={"prom_dia": "Encuestas promedio / día"},
-                    title="Productividad diaria — distribución del equipo",
+                    labels={"enc_semana": "Encuestas en la semana"},
+                    title="Distribución de encuestas por encuestador — semana seleccionada",
                 )
-                fig.add_vline(x=META_DIA, line_dash="dash", line_color=VERDE,
-                              annotation_text=f"Meta ({META_DIA})", annotation_position="top right")
-                fig.add_vline(x=UMBRAL_AMARILLO, line_dash="dot", line_color=ROJO,
-                              annotation_text=f"Mínimo ({UMBRAL_AMARILLO})", annotation_position="top left")
-                fig.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                                  font_family="IBM Plex Sans", margin=dict(t=50, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                fig_hist.add_vline(x=META_SEMANAL, line_dash="dash", line_color=VERDE,
+                                   annotation_text=f"Meta ({META_SEMANAL})",
+                                   annotation_position="top right")
+                fig_hist.add_vline(x=AMARILLO_MIN, line_dash="dot", line_color=ROJO,
+                                   annotation_text=f"Mínimo ({AMARILLO_MIN})",
+                                   annotation_position="top left")
+                fig_hist.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                       font_family="IBM Plex Sans", margin=dict(t=50, b=10))
+                st.plotly_chart(fig_hist, use_container_width=True)
 
             with d2:
-                df_conf_plot = df[df["duracion_confiable"]] if "duracion_confiable" in df.columns else df
-                fig2 = px.box(
+                df_conf_plot = df_sem[df_sem["duracion_confiable"]] \
+                    if "duracion_confiable" in df_sem.columns else df_sem
+                fig_box = px.box(
                     df_conf_plot, y="duracion_min",
                     color_discrete_sequence=[VERDE],
                     labels={"duracion_min": "Minutos"},
                     title="Duración de entrevistas — solo timestamps confiables",
                 )
-                fig2.add_hline(y=DUR_MAX_MIN, line_dash="dash", line_color=AMARILLO,
-                               annotation_text=f"Máx recomendado ({DUR_MAX_MIN} min)")
-                fig2.add_hline(y=DUR_MIN_MIN, line_dash="dot",  line_color=ROJO,
-                               annotation_text=f"Mín recomendado ({DUR_MIN_MIN} min)")
-                fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                                   font_family="IBM Plex Sans", margin=dict(t=50, b=10))
-                st.plotly_chart(fig2, use_container_width=True)
+                fig_box.add_hline(y=DUR_MAX_MIN, line_dash="dash", line_color=AMARILLO,
+                                  annotation_text=f"Máx ({DUR_MAX_MIN} min)")
+                fig_box.add_hline(y=DUR_MIN_MIN, line_dash="dot",  line_color=ROJO,
+                                  annotation_text=f"Mín ({DUR_MIN_MIN} min)")
+                fig_box.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                      font_family="IBM Plex Sans", margin=dict(t=50, b=10))
+                st.plotly_chart(fig_box, use_container_width=True)
 
         # ── Ficha individual ───────────────────────────────────────────────────
         st.markdown('<div class="sec-title">Ficha individual de encuestador</div>',
                     unsafe_allow_html=True)
 
-        enc_nombres = sorted(df["encuestador_nombre"].dropna().unique().tolist())
+        enc_nombres = sorted(df_t1["encuestador_nombre"].dropna().unique().tolist())
         if enc_nombres:
             enc_pick = st.selectbox("Seleccionar encuestador", enc_nombres, key="ficha_enc")
             df_enc   = df[df["encuestador_nombre"] == enc_pick]
+            df_enc_t1 = df_t1[df_t1["encuestador_nombre"] == enc_pick].copy()
+
+            # Resumen semanal del encuestador
+            sem_enc = (
+                df_enc_t1.groupby("semana_op")
+                .agg(enc_sem=("folio", "count"), fechas=("fecha", list))
+                .reset_index()
+            )
+            sem_enc["dias_activos"] = sem_enc["fechas"].apply(dias_activos_str)
+            sem_enc["semana_str"]   = sem_enc["semana_op"].apply(
+                lambda d: f"{d.strftime('%d %b')} – {(d + _dt.timedelta(days=6)).strftime('%d %b')}"
+            )
+            sem_enc["_sem"] = sem_enc["enc_sem"].apply(sem_semanal)
 
             fi1, fi2, fi3, fi4 = st.columns(4)
-            fi1.metric("Total encuestas", len(df_enc))
-            fi2.metric("Días trabajados", df_enc["fecha"].nunique())
-            fi3.metric("Prom/día",        round(len(df_enc) / max(df_enc["fecha"].nunique(), 1), 1))
-            fi4.metric("Dur. prom (min)", round(df_enc["duracion_min"].mean(), 1) if len(df_enc) else 0)
+            fi1.metric("Total encuestas",  len(df_enc))
+            fi2.metric("Días trabajados",  df_enc["fecha"].nunique())
+            fi3.metric("Semanas activas",  len(sem_enc))
+            fi4.metric("Dur. prom (min)",
+                       round(pd.to_numeric(df_enc["duracion_min"],
+                                           errors="coerce").mean(), 1))
 
+            # Mini-tabla semanal
+            st.markdown("**Avance por semana operativa**")
+            tbl_enc_sem = sem_enc[["semana_str", "enc_sem", "dias_activos"]].copy()
+            tbl_enc_sem.columns = ["Semana", "Enc. semana", "Días activos"]
+            tbl_enc_sem_styled = (
+                tbl_enc_sem.style
+                .map(color_semanal, subset=["Enc. semana"])
+                .format({"Enc. semana": "{:.0f}"})
+                .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"})
+            )
+            st.dataframe(tbl_enc_sem_styled, use_container_width=True,
+                         hide_index=True, height=min(80 + len(sem_enc) * 35, 280))
+
+            # Curva diaria + histograma de duraciones
             fa1, fa2 = st.columns(2)
             with fa1:
                 diario_enc = df_enc.groupby("fecha").size().reset_index(name="n")
@@ -608,7 +778,7 @@ with tab1:
                               labels={"fecha": "Fecha", "n": "Encuestas"},
                               title=f"Encuestas por día — {enc_pick}")
                 fig3.add_hline(y=META_DIA, line_dash="dash", line_color=VERDE,
-                               annotation_text="Meta")
+                               annotation_text=f"Ref. diaria ({META_DIA})")
                 fig3.update_layout(plot_bgcolor="white", paper_bgcolor="white",
                                    font_family="IBM Plex Sans", margin=dict(t=50, b=10))
                 st.plotly_chart(fig3, use_container_width=True)
@@ -632,7 +802,6 @@ with tab1:
                     ", ".join([f"**{int(r['seccion'])}** ({r['n']})"
                                for _, r in sec_enc.iterrows() if pd.notna(r["seccion"])])
                 )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – MAPA
@@ -823,200 +992,601 @@ with tab2:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 – PERFIL
+# TAB 3 – PERFIL  (solo rol estatal)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown('<div class="sec-title">Perfil sociodemográfico de entrevistados</div>',
-                unsafe_allow_html=True)
+if tab3 is not None:
+    with tab3:
+      st.markdown('<div class="sec-title">Perfil sociodemográfico de entrevistados</div>',
+                  unsafe_allow_html=True)
 
-    if total == 0:
-        st.info("Sin registros para los filtros seleccionados.")
-    else:
-        c1, c2, c3 = st.columns(3)
+      if total == 0:
+          st.info("Sin registros para los filtros seleccionados.")
+      else:
+          c1, c2, c3 = st.columns(3)
 
-        with c1:
-            cnt = df["sexo"].value_counts().reset_index()
-            cnt.columns = ["Sexo", "n"]
-            fig = px.pie(cnt, names="Sexo", values="n", hole=0.42,
-                         color_discrete_sequence=[AZUL_L, NARANJA, "#ccc"],
-                         title="Distribución por sexo")
-            fig.update_layout(font_family="IBM Plex Sans", margin=dict(t=40, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+          with c1:
+              cnt = df["sexo"].value_counts().reset_index()
+              cnt.columns = ["Sexo", "n"]
+              fig = px.pie(cnt, names="Sexo", values="n", hole=0.42,
+                           color_discrete_sequence=[AZUL_L, NARANJA, "#ccc"],
+                           title="Distribución por sexo")
+              fig.update_layout(font_family="IBM Plex Sans", margin=dict(t=40, b=0))
+              st.plotly_chart(fig, use_container_width=True)
 
-        with c2:
-            edu_order = ["Primaria", "Secundaria", "Preparatoria", "Universidad", "Posgrado"]
-            cnt = df["nivel_educativo"].value_counts().reindex(edu_order).reset_index()
-            cnt.columns = ["Nivel", "n"]
-            fig2 = px.bar(cnt, x="Nivel", y="n", text="n",
-                          color_discrete_sequence=[VERDE], title="Nivel educativo")
-            fig2.update_traces(textposition="outside")
-            fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                               font_family="IBM Plex Sans", margin=dict(t=40, b=0))
-            st.plotly_chart(fig2, use_container_width=True)
+          with c2:
+              edu_order = ["Primaria", "Secundaria", "Preparatoria", "Universidad", "Posgrado"]
+              cnt = df["nivel_educativo"].value_counts().reindex(edu_order).reset_index()
+              cnt.columns = ["Nivel", "n"]
+              fig2 = px.bar(cnt, x="Nivel", y="n", text="n",
+                            color_discrete_sequence=[VERDE], title="Nivel educativo")
+              fig2.update_traces(textposition="outside")
+              fig2.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                 font_family="IBM Plex Sans", margin=dict(t=40, b=0))
+              st.plotly_chart(fig2, use_container_width=True)
 
-        with c3:
-            cnt = df["recibe_bienestar"].value_counts().reset_index()
-            cnt.columns = ["Recibe Bienestar", "n"]
-            fig3 = px.pie(cnt, names="Recibe Bienestar", values="n", hole=0.42,
-                          color_discrete_sequence=[VERDE, "#ccc"],
-                          title="¿Recibe programa Bienestar?")
-            fig3.update_layout(font_family="IBM Plex Sans", margin=dict(t=40, b=0))
-            st.plotly_chart(fig3, use_container_width=True)
+          with c3:
+              cnt = df["recibe_bienestar"].value_counts().reset_index()
+              cnt.columns = ["Recibe Bienestar", "n"]
+              fig3 = px.pie(cnt, names="Recibe Bienestar", values="n", hole=0.42,
+                            color_discrete_sequence=[VERDE, "#ccc"],
+                            title="¿Recibe programa Bienestar?")
+              fig3.update_layout(font_family="IBM Plex Sans", margin=dict(t=40, b=0))
+              st.plotly_chart(fig3, use_container_width=True)
 
-        # Pirámide
-        st.markdown('<div class="sec-title">Pirámide de edades</div>', unsafe_allow_html=True)
-        df_pir = df.copy()
-        df_pir["edad"] = pd.to_numeric(df_pir["edad"], errors="coerce")
-        df_pir = df_pir.dropna(subset=["edad"])
-        if len(df_pir) > 0:
-            df_pir["grupo_edad"] = pd.cut(
-                df_pir["edad"], bins=[17, 25, 35, 45, 55, 65, 120],
-                labels=["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
-            )
-            pir = df_pir.groupby(["grupo_edad", "sexo"]).size().reset_index(name="n")
-            pir = pir[pir["sexo"].isin(["Hombre", "Mujer"])]
-            pir.loc[pir["sexo"] == "Hombre", "n"] *= -1
-            max_val = pir["n"].abs().max()
-            ticks_pos = list(range(0, int(max_val) + 5, max(int(max_val // 4), 1)))
-            ticks_val = [-t for t in reversed(ticks_pos[1:])] + ticks_pos
+          # Pirámide
+          st.markdown('<div class="sec-title">Pirámide de edades</div>', unsafe_allow_html=True)
+          df_pir = df.copy()
+          df_pir["edad"] = pd.to_numeric(df_pir["edad"], errors="coerce")
+          df_pir = df_pir.dropna(subset=["edad"])
+          if len(df_pir) > 0:
+              df_pir["grupo_edad"] = pd.cut(
+                  df_pir["edad"], bins=[17, 25, 35, 45, 55, 65, 120],
+                  labels=["18-25", "26-35", "36-45", "46-55", "56-65", "65+"]
+              )
+              pir = df_pir.groupby(["grupo_edad", "sexo"]).size().reset_index(name="n")
+              pir = pir[pir["sexo"].isin(["Hombre", "Mujer"])]
+              pir.loc[pir["sexo"] == "Hombre", "n"] *= -1
+              max_val = pir["n"].abs().max()
+              ticks_pos = list(range(0, int(max_val) + 5, max(int(max_val // 4), 1)))
+              ticks_val = [-t for t in reversed(ticks_pos[1:])] + ticks_pos
 
-            fig_p = px.bar(pir, x="n", y="grupo_edad", color="sexo", orientation="h",
-                           color_discrete_map={"Hombre": AZUL_L, "Mujer": NARANJA},
-                           labels={"n": "Conteo", "grupo_edad": ""},
-                           title="Pirámide de edades", height=300)
-            fig_p.update_xaxes(tickvals=ticks_val, ticktext=[abs(t) for t in ticks_val])
-            fig_p.update_layout(plot_bgcolor="white", paper_bgcolor="white",
-                                font_family="IBM Plex Sans", margin=dict(t=40, b=10))
-            st.plotly_chart(fig_p, use_container_width=True)
+              fig_p = px.bar(pir, x="n", y="grupo_edad", color="sexo", orientation="h",
+                             color_discrete_map={"Hombre": AZUL_L, "Mujer": NARANJA},
+                             labels={"n": "Conteo", "grupo_edad": ""},
+                             title="Pirámide de edades", height=300)
+              fig_p.update_xaxes(tickvals=ticks_val, ticktext=[abs(t) for t in ticks_val])
+              fig_p.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                                  font_family="IBM Plex Sans", margin=dict(t=40, b=10))
+              st.plotly_chart(fig_p, use_container_width=True)
 
+
+  # ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 – RESULTADOS  (solo rol estatal)
+# ══════════════════════════════════════════════════════════════════════════════
+if tab4 is not None:
+    with tab4:
+
+      if total == 0:
+          st.info("Sin registros para los filtros seleccionados.")
+      else:
+          orden_sat = ["Muy satisfecho", "Satisfecho", "Regular", "Insatisfecho"]
+          col_sat   = [VERDE, VERDE_L, NARANJA, ROJO]
+
+          # ── Evolución temporal por semana ──────────────────────────────────
+          st.markdown('<div class="sec-title">Evolución semanal de percepciones</div>',
+                      unsafe_allow_html=True)
+
+          df_trend = df.copy()
+          df_trend["semana"] = df_trend["fecha"].apply(semana_operativo)
+          semanas_disp = sorted(df_trend["semana"].unique(), key=lambda s: int(s[1:]))
+
+          if len(semanas_disp) < 2:
+              st.info(
+                  f"Aún solo hay datos de **{semanas_disp[0] if semanas_disp else 'una semana'}**. "
+                  "La evolución temporal estará disponible cuando haya al menos dos semanas de campo."
+              )
+          else:
+              PREGUNTAS_TREND = {
+                  "P5 — ¿Ha escuchado de Iván Hernández?":   ("p5_conoce",     OPCIONES["p5_conoce"]),
+                  "P7 — Cercanía con la gente":               ("p7_cercania",   OPCIONES["p7_cercania"]),
+                  "P8 — Representa valores de la 4T":         ("p8_valores_4t", OPCIONES["p8_valores_4t"]),
+                  "P9 — Intención de voto":                   ("p9_voto",       OPCIONES["p9_voto"]),
+                  "P1 — Satisfacción con AMLO":               ("p1_amlo",       OPCIONES["p1_amlo"]),
+                  "P2 — Satisfacción con Claudia Sheinbaum":  ("p2_sheinbaum",  OPCIONES["p2_sheinbaum"]),
+                  "P3 — Programas Bienestar mejoran la vida": ("p3_bienestar",  OPCIONES["p3_bienestar"]),
+              }
+
+              tc1, tc2 = st.columns([2, 1])
+              with tc1:
+                  preg_label = st.selectbox(
+                      "Pregunta a visualizar", list(PREGUNTAS_TREND.keys()), key="trend_pregunta"
+                  )
+              with tc2:
+                  granularidad = st.radio(
+                      "Granularidad", ["Semana", "Día"], horizontal=True, key="trend_gran"
+                  )
+
+              campo_trend, opciones_trend = PREGUNTAS_TREND[preg_label]
+
+              if granularidad == "Semana":
+                  df_trend["grupo"] = df_trend["semana"]
+                  grupos_ord = semanas_disp
+              else:
+                  df_trend["grupo"] = df_trend["fecha"].astype(str)
+                  grupos_ord = sorted(df_trend["grupo"].unique())
+
+              trend_rows = []
+              for grp in grupos_ord:
+                  sub = df_trend[df_trend["grupo"] == grp][campo_trend].dropna()
+                  n_grp = len(sub)
+                  if n_grp == 0:
+                      continue
+                  for opc in opciones_trend:
+                      pct = round((sub == opc).sum() / n_grp * 100, 1)
+                      trend_rows.append({"Período": str(grp), "Opción": opc,
+                                         "Porcentaje": pct, "n": n_grp})
+
+              if trend_rows:
+                  df_tp = pd.DataFrame(trend_rows)
+                  n_por_grupo = df_tp.groupby("Período")["n"].first().to_dict()
+                  df_tp["Período_label"] = df_tp["Período"].apply(
+                      lambda g: f"{g}  (n={n_por_grupo.get(g,0):,})"
+                  )
+                  periodos_label_ord = [
+                      f"{g}  (n={n_por_grupo.get(g,0):,})"
+                      for g in grupos_ord if g in n_por_grupo
+                  ]
+                  paleta = [VERDE, VERDE_L, AZUL_L, NARANJA, ROJO, AMARILLO, "#aaa"]
+                  color_map = {opc: paleta[i % len(paleta)] for i, opc in enumerate(opciones_trend)}
+
+                  fig_trend = px.line(
+                      df_tp, x="Período_label", y="Porcentaje", color="Opción",
+                      markers=True, color_discrete_map=color_map,
+                      category_orders={"Período_label": periodos_label_ord},
+                      labels={"Porcentaje": "%", "Período_label": ""},
+                      title=f"Evolución — {preg_label}", height=380,
+                  )
+                  fig_trend.update_traces(line=dict(width=2.5), marker=dict(size=8))
+                  fig_trend.update_layout(
+                      plot_bgcolor="white", paper_bgcolor="white",
+                      font_family="IBM Plex Sans", margin=dict(t=50, b=10),
+                      yaxis=dict(range=[0, 105], ticksuffix="%"),
+                      legend=dict(orientation="h", yanchor="bottom", y=-0.4, xanchor="left", x=0),
+                  )
+                  st.plotly_chart(fig_trend, use_container_width=True)
+
+                  # Tabla delta (solo granularidad Semana con ≥2 semanas)
+                  if granularidad == "Semana":
+                      st.markdown(
+                          '<div class="sec-title">Cambio semana a semana (puntos porcentuales)</div>',
+                          unsafe_allow_html=True)
+                      pivot = df_tp.pivot_table(
+                          index="Opción", columns="Período", values="Porcentaje"
+                      ).reindex(opciones_trend)
+                      pivot = pivot[[s for s in semanas_disp if s in pivot.columns]]
+                      sem_cols = list(pivot.columns)
+                      for i in range(1, len(sem_cols)):
+                          d_col = f"Δ {sem_cols[i-1]}→{sem_cols[i]}"
+                          pivot[d_col] = (pivot[sem_cols[i]] - pivot[sem_cols[i-1]]).round(1)
+
+                      def color_delta(val):
+                          if pd.isna(val): return ""
+                          if val > 0:  return "color:#155724;font-weight:600"
+                          if val < 0:  return "color:#721C24;font-weight:600"
+                          return "color:#555"
+
+                      fmt = {c: "{:.1f}%" for c in sem_cols}
+                      fmt.update({c: "{:+.1f}pp" for c in pivot.columns if c.startswith("Δ")})
+                      d_cols = [c for c in pivot.columns if c.startswith("Δ")]
+                      st.dataframe(
+                          pivot.reset_index().style
+                          .format(fmt, na_rep="—")
+                          .map(color_delta, subset=d_cols)
+                          .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"}),
+                          use_container_width=True, hide_index=True,
+                      )
+                      st.caption("pp = puntos porcentuales.  🟢 Sube · 🔴 Baja")
+
+          st.markdown("---")
+
+          # ── Sección A ──────────────────────────────────────────────────────────
+          st.markdown('<div class="sec-title">Sección A — Contexto de Gobierno y 4T</div>',
+                      unsafe_allow_html=True)
+          a1, a2 = st.columns(2)
+          with a1:
+              show_chart(pct_bar(df, "p1_amlo", "P1. Satisfacción con AMLO", orden_sat, col_sat))
+          with a2:
+              show_chart(pct_bar(df, "p2_sheinbaum", "P2. Satisfacción con Claudia Sheinbaum",
+                                 orden_sat, col_sat))
+          show_chart(pct_bar(df, "p3_bienestar",
+                             "P3. ¿Los Programas del Bienestar han mejorado la vida en Guerrero?",
+                             ["Mucho", "Algo", "Poco", "Nada"], col_sat, height=220))
+
+          # ── Sección B ──────────────────────────────────────────────────────────
+          st.markdown('<div class="sec-title">Sección B — Posicionamiento de Iván Hernández</div>',
+                      unsafe_allow_html=True)
+
+          # P4a y P4b por separado
+          b0a, b0b = st.columns(2)
+          orden_p4 = OPCIONES["p4a_delegado_amlo"]
+          col_p4   = [VERDE, VERDE_L, NARANJA, "#aaa"]
+          with b0a:
+              show_chart(pct_bar(df, "p4a_delegado_amlo",
+                                 "P4a. ¿Sabía que AMLO designó a Iván Hernández como Delegado Bienestar?",
+                                 orden_p4, col_p4))
+          with b0b:
+              show_chart(pct_bar(df, "p4b_delegado_csp",
+                                 "P4b. ¿Sabía que Claudia Sheinbaum lo ratificó en el cargo?",
+                                 orden_p4, col_p4))
+
+          b1, b2 = st.columns(2)
+          with b1:
+              show_chart(pct_bar(df, "p5_conoce",
+                                 "P5. ¿Ha escuchado hablar de Iván Hernández Díaz?",
+                                 ["Sí", "No"], [VERDE, "#ccc"]))
+              df_conoce = df[df["p5_conoce"] == "Sí"]
+              show_chart(pct_bar(df_conoce, "p6_opinion",
+                                 "P6. Opinión sobre su trabajo como Delegado (entre quienes lo conocen)",
+                                 OPCIONES["p6_opinion"], [VERDE, VERDE_L, NARANJA, ROJO, "#aaa"]))
+          with b2:
+              show_chart(pct_bar(df, "p7_cercania",
+                                 "P7. ¿Qué tan cercano considera que es a la gente de Guerrero?",
+                                 OPCIONES["p7_cercania"], [VERDE, VERDE_L, NARANJA, "#aaa"]))
+              show_chart(pct_bar(df, "p8_valores_4t",
+                                 "P8. ¿Representa los valores de la Cuarta Transformación?",
+                                 OPCIONES["p8_valores_4t"], [VERDE, VERDE_L, ROJO, "#aaa"]))
+
+          # ── Sección C ──────────────────────────────────────────────────────────
+          st.markdown('<div class="sec-title">Sección C — Intención de Voto y Percepción</div>',
+                      unsafe_allow_html=True)
+
+          show_chart(pct_bar(df, "p9_voto",
+                             "P9. Si hoy fueran las elecciones para gobernador, ¿votaría por Iván Hernández?",
+                             OPCIONES["p9_voto"], [VERDE, VERDE_L, NARANJA, ROJO, "#aaa"], height=240))
+
+          c1, c2 = st.columns(2)
+          with c1:
+              show_chart(pct_bar(df, "p10_frase",
+                                 "P10. ¿Qué frase describe mejor lo que piensa de Iván Hernández?",
+                                 OPCIONES["p10_frase"]))
+
+          # ── P11 — multi-respuesta ──────────────────────────────────────────────
+          with c2:
+              p11_cols = list(OPCIONES["p11_labels"].keys())
+              p11_labels = OPCIONES["p11_labels"]
+              p11_disponibles = [c for c in p11_cols if c in df.columns]
+
+              if p11_disponibles:
+                  p11_freq = pd.DataFrame({
+                      "Opción": [p11_labels[c] for c in p11_disponibles],
+                      "Menciones": [int(df[c].sum()) for c in p11_disponibles],
+                  }).sort_values("Menciones", ascending=True)
+
+                  p11_freq["Porcentaje"] = (p11_freq["Menciones"] / max(total, 1) * 100).round(1)
+
+                  fig_p11 = px.bar(
+                      p11_freq, x="Porcentaje", y="Opción", orientation="h",
+                      text=p11_freq["Porcentaje"].apply(lambda x: f"{x}%"),
+                      color_discrete_sequence=[VERDE_L],
+                      title="P11. Prioridad #1 para el próximo gobernador (multi-respuesta)",
+                      height=300,
+                  )
+                  fig_p11.update_traces(textposition="outside")
+                  fig_p11.update_layout(
+                      plot_bgcolor="white", paper_bgcolor="white",
+                      showlegend=False, font_family="IBM Plex Sans",
+                      margin=dict(t=45, b=5, l=160), xaxis_range=[0, 105],
+                  )
+                  st.plotly_chart(fig_p11, use_container_width=True)
+                  st.caption("Porcentaje sobre total de encuestas. Respuesta múltiple — la suma puede superar 100%.")
+
+          # ── Datos de contacto capturados ──────────────────────────────────────
+          st.markdown('<div class="sec-title">Datos de contacto capturados</div>',
+                      unsafe_allow_html=True)
+
+          df_term      = df[df["terminada"]] if "terminada" in df.columns else df
+          n_term       = len(df_term)
+          n_cel        = int(df_term["tiene_celular"].sum()) if "tiene_celular" in df_term.columns else 0
+          n_cor        = int(df_term["tiene_correo"].sum())  if "tiene_correo"  in df_term.columns else 0
+          pct_cel      = round(n_cel / max(n_term, 1) * 100, 1)
+          pct_cor      = round(n_cor / max(n_term, 1) * 100, 1)
+
+          ct1, ct2, _ = st.columns([1, 1, 2])
+          kpi(ct1, f"{n_cel:,}", "Celulares capturados",
+              f"{pct_cel}% de {n_term:,} enc. terminadas")
+          kpi(ct2, f"{n_cor:,}", "Correos capturados",
+              f"{pct_cor}% de {n_term:,} enc. terminadas", "azul")
+
+          # ── Descarga ───────────────────────────────────────────────────────────
+          st.markdown("---")
+          # Excluir PII y columnas internas antes de exportar
+          cols_excluir_csv = {"tiene_celular", "tiene_correo", "terminada",
+                              "duracion_confiable", "fecha_inicio", "fecha_fin"}
+          cols_csv = [c for c in df.columns if c not in cols_excluir_csv]
+          csv_out = df[cols_csv].to_csv(index=False).encode("utf-8")
+          st.download_button(
+              "⬇️ Descargar datos filtrados (CSV)", csv_out,
+              f"ceop_guerrero_{muni_sel.lower().replace(' ','_')}.csv", "text/csv"
+          )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 – RESULTADOS
+# TAB 5 – EVOLUCIÓN SEMANAL  (solo rol estatal)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab4:
+if tab5 is not None:
+    with tab5:
 
-    if total == 0:
-        st.info("Sin registros para los filtros seleccionados.")
-    else:
-        orden_sat = ["Muy satisfecho", "Satisfecho", "Regular", "Insatisfecho"]
-        col_sat   = [VERDE, VERDE_L, NARANJA, ROJO]
+        if total == 0:
+            st.info("Sin registros para los filtros seleccionados.")
+        else:
+            # ── Preparar columna de semana ─────────────────────────────────────
+            df_ev = df.copy()
+            df_ev["semana"] = df_ev["fecha"].apply(semana_operativo)
+            semanas_ord = sorted(df_ev["semana"].unique(), key=lambda s: int(s[1:]))
 
-        # ── Sección A ──────────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">Sección A — Contexto de Gobierno y 4T</div>',
-                    unsafe_allow_html=True)
-        a1, a2 = st.columns(2)
-        with a1:
-            show_chart(pct_bar(df, "p1_amlo", "P1. Satisfacción con AMLO", orden_sat, col_sat))
-        with a2:
-            show_chart(pct_bar(df, "p2_sheinbaum", "P2. Satisfacción con Claudia Sheinbaum",
-                               orden_sat, col_sat))
-        show_chart(pct_bar(df, "p3_bienestar",
-                           "P3. ¿Los Programas del Bienestar han mejorado la vida en Guerrero?",
-                           ["Mucho", "Algo", "Poco", "Nada"], col_sat, height=220))
+            # Base para P6: solo quienes conocen a Iván
+            df_ev_conoce = df_ev[df_ev["p5_conoce"] == "Sí"]
 
-        # ── Sección B ──────────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">Sección B — Posicionamiento de Iván Hernández</div>',
-                    unsafe_allow_html=True)
+            # ── Helper: mini-gráfica de líneas por semana ──────────────────────
+            def mini_trend(df_base, campo, titulo, opciones, nota=None):
+                """
+                Retorna un go.Figure de líneas % por semana.
+                df_base: DataFrame ya filtrado (ej. solo quienes conocen a Iván para P6).
+                """
+                import plotly.graph_objects as go
 
-        # P4a y P4b por separado
-        b0a, b0b = st.columns(2)
-        orden_p4 = OPCIONES["p4a_delegado_amlo"]
-        col_p4   = [VERDE, VERDE_L, NARANJA, "#aaa"]
-        with b0a:
-            show_chart(pct_bar(df, "p4a_delegado_amlo",
-                               "P4a. ¿Sabía que AMLO designó a Iván Hernández como Delegado Bienestar?",
-                               orden_p4, col_p4))
-        with b0b:
-            show_chart(pct_bar(df, "p4b_delegado_csp",
-                               "P4b. ¿Sabía que Claudia Sheinbaum lo ratificó en el cargo?",
-                               orden_p4, col_p4))
+                paleta = [VERDE, NARANJA, AZUL_L, ROJO, VERDE_L, AMARILLO, "#aaa"]
+                rows = []
+                for sem in semanas_ord:
+                    sub = df_base[df_base["semana"] == sem][campo].dropna()
+                    n = len(sub)
+                    if n == 0:
+                        continue
+                    for opc in opciones:
+                        rows.append({
+                            "semana": sem,
+                            "Opción": opc,
+                            "pct": round((sub == opc).sum() / n * 100, 1),
+                            "n": n,
+                        })
 
-        b1, b2 = st.columns(2)
-        with b1:
-            show_chart(pct_bar(df, "p5_conoce",
-                               "P5. ¿Ha escuchado hablar de Iván Hernández Díaz?",
-                               ["Sí", "No"], [VERDE, "#ccc"]))
-            df_conoce = df[df["p5_conoce"] == "Sí"]
-            show_chart(pct_bar(df_conoce, "p6_opinion",
-                               "P6. Opinión sobre su trabajo como Delegado (entre quienes lo conocen)",
-                               OPCIONES["p6_opinion"], [VERDE, VERDE_L, NARANJA, ROJO, "#aaa"]))
-        with b2:
-            show_chart(pct_bar(df, "p7_cercania",
-                               "P7. ¿Qué tan cercano considera que es a la gente de Guerrero?",
-                               OPCIONES["p7_cercania"], [VERDE, VERDE_L, NARANJA, "#aaa"]))
-            show_chart(pct_bar(df, "p8_valores_4t",
-                               "P8. ¿Representa los valores de la Cuarta Transformación?",
-                               OPCIONES["p8_valores_4t"], [VERDE, VERDE_L, ROJO, "#aaa"]))
+                if not rows:
+                    return None
 
-        # ── Sección C ──────────────────────────────────────────────────────────
-        st.markdown('<div class="sec-title">Sección C — Intención de Voto y Percepción</div>',
-                    unsafe_allow_html=True)
+                df_p = pd.DataFrame(rows)
+                fig = go.Figure()
+                for i, opc in enumerate(opciones):
+                    sub_opc = df_p[df_p["Opción"] == opc]
+                    if sub_opc.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=sub_opc["semana"],
+                        y=sub_opc["pct"],
+                        mode="lines+markers",
+                        name=opc,
+                        line=dict(color=paleta[i % len(paleta)], width=2),
+                        marker=dict(size=7),
+                        hovertemplate=f"<b>{opc}</b><br>%{{y:.1f}}%<br>n=%{{customdata}}<extra></extra>",
+                        customdata=sub_opc["n"],
+                    ))
 
-        show_chart(pct_bar(df, "p9_voto",
-                           "P9. Si hoy fueran las elecciones para gobernador, ¿votaría por Iván Hernández?",
-                           OPCIONES["p9_voto"], [VERDE, VERDE_L, NARANJA, ROJO, "#aaa"], height=240))
-
-        c1, c2 = st.columns(2)
-        with c1:
-            show_chart(pct_bar(df, "p10_frase",
-                               "P10. ¿Qué frase describe mejor lo que piensa de Iván Hernández?",
-                               OPCIONES["p10_frase"]))
-
-        # ── P11 — multi-respuesta ──────────────────────────────────────────────
-        with c2:
-            p11_cols = list(OPCIONES["p11_labels"].keys())
-            p11_labels = OPCIONES["p11_labels"]
-            p11_disponibles = [c for c in p11_cols if c in df.columns]
-
-            if p11_disponibles:
-                p11_freq = pd.DataFrame({
-                    "Opción": [p11_labels[c] for c in p11_disponibles],
-                    "Menciones": [int(df[c].sum()) for c in p11_disponibles],
-                }).sort_values("Menciones", ascending=True)
-
-                p11_freq["Porcentaje"] = (p11_freq["Menciones"] / max(total, 1) * 100).round(1)
-
-                fig_p11 = px.bar(
-                    p11_freq, x="Porcentaje", y="Opción", orientation="h",
-                    text=p11_freq["Porcentaje"].apply(lambda x: f"{x}%"),
-                    color_discrete_sequence=[VERDE_L],
-                    title="P11. Prioridad #1 para el próximo gobernador (multi-respuesta)",
-                    height=300,
-                )
-                fig_p11.update_traces(textposition="outside")
-                fig_p11.update_layout(
+                fig.update_layout(
+                    title=dict(text=titulo, font=dict(size=13, family="IBM Plex Sans"), x=0),
                     plot_bgcolor="white", paper_bgcolor="white",
-                    showlegend=False, font_family="IBM Plex Sans",
-                    margin=dict(t=45, b=5, l=160), xaxis_range=[0, 105],
+                    font_family="IBM Plex Sans",
+                    margin=dict(t=40, b=60, l=10, r=10),
+                    height=280,
+                    yaxis=dict(range=[0, 105], ticksuffix="%", tickfont=dict(size=10)),
+                    xaxis=dict(tickfont=dict(size=10)),
+                    legend=dict(
+                        orientation="h", font=dict(size=9),
+                        yanchor="top", y=-0.18, xanchor="left", x=0,
+                    ),
+                    showlegend=True,
                 )
-                st.plotly_chart(fig_p11, use_container_width=True)
-                st.caption("Porcentaje sobre total de encuestas. Respuesta múltiple — la suma puede superar 100%.")
+                if nota:
+                    fig.add_annotation(
+                        text=nota, xref="paper", yref="paper",
+                        x=0, y=-0.32, showarrow=False,
+                        font=dict(size=9, color="#888"), xanchor="left",
+                    )
+                return fig
 
-        # ── Datos de contacto capturados ──────────────────────────────────────
-        st.markdown('<div class="sec-title">Datos de contacto capturados</div>',
-                    unsafe_allow_html=True)
+            # ── Definición de preguntas estratégicas ───────────────────────────
+            PANEL = [
+                {
+                    "campo":   "p3_bienestar",
+                    "titulo":  "P3 — Bienestar mejora la vida",
+                    "opciones": OPCIONES["p3_bienestar"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p4a_delegado_amlo",
+                    "titulo":  "P4a — Sabía que AMLO designó a Iván",
+                    "opciones": OPCIONES["p4a_delegado_amlo"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p4b_delegado_csp",
+                    "titulo":  "P4b — Sabía que Sheinbaum lo ratificó",
+                    "opciones": OPCIONES["p4b_delegado_csp"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p5_conoce",
+                    "titulo":  "P5 — ¿Ha escuchado de Iván Hernández?",
+                    "opciones": OPCIONES["p5_conoce"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p6_opinion",
+                    "titulo":  "P6 — Opinión sobre su trabajo",
+                    "opciones": OPCIONES["p6_opinion"],
+                    "base":    df_ev_conoce,
+                    "nota":    f"Solo entre quienes lo conocen (P5=Sí, n={len(df_ev_conoce):,})",
+                },
+                {
+                    "campo":   "p7_cercania",
+                    "titulo":  "P7 — Cercanía con la gente",
+                    "opciones": OPCIONES["p7_cercania"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p8_valores_4t",
+                    "titulo":  "P8 — Representa valores de la 4T",
+                    "opciones": OPCIONES["p8_valores_4t"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+                {
+                    "campo":   "p9_voto",
+                    "titulo":  "P9 — Intención de voto",
+                    "opciones": OPCIONES["p9_voto"],
+                    "base":    df_ev,
+                    "nota":    None,
+                },
+            ]
 
-        df_term      = df[df["terminada"]] if "terminada" in df.columns else df
-        n_term       = len(df_term)
-        n_cel        = int(df_term["tiene_celular"].sum()) if "tiene_celular" in df_term.columns else 0
-        n_cor        = int(df_term["tiene_correo"].sum())  if "tiene_correo"  in df_term.columns else 0
-        pct_cel      = round(n_cel / max(n_term, 1) * 100, 1)
-        pct_cor      = round(n_cor / max(n_term, 1) * 100, 1)
+            # ── Una sola semana: aviso ─────────────────────────────────────────
+            if len(semanas_ord) < 2:
+                st.info(
+                    f"Aún solo hay datos de **{semanas_ord[0] if semanas_ord else 'una semana'}**. "
+                    "El panel de evolución activará automáticamente cuando haya al menos "
+                    "dos semanas de campo."
+                )
+                # Mostrar distribución actual como referencia de línea base
+                st.markdown(
+                    f'<div class="sec-title">Línea base — {semanas_ord[0] if semanas_ord else ""}</div>',
+                    unsafe_allow_html=True,
+                )
+                for i in range(0, len(PANEL), 2):
+                    cols = st.columns(2)
+                    for j, cfg in enumerate(PANEL[i:i+2]):
+                        sub = cfg["base"][cfg["campo"]].dropna()
+                        if sub.empty:
+                            continue
+                        cnt = (sub.value_counts(normalize=True)
+                               .mul(100).round(1).reindex(cfg["opciones"]).reset_index())
+                        cnt.columns = ["Opción", "%"]
+                        fig_base = px.bar(
+                            cnt, x="%", y="Opción", orientation="h",
+                            color="Opción",
+                            color_discrete_sequence=[VERDE, VERDE_L, AZUL_L, NARANJA, ROJO, "#aaa"],
+                            text=cnt["%"].apply(lambda v: f"{v}%" if pd.notna(v) else ""),
+                            title=cfg["titulo"], height=240,
+                        )
+                        fig_base.update_traces(textposition="outside")
+                        fig_base.update_layout(
+                            plot_bgcolor="white", paper_bgcolor="white",
+                            showlegend=False, font_family="IBM Plex Sans",
+                            margin=dict(t=40, b=5, l=200), xaxis_range=[0, 105],
+                        )
+                        with cols[j]:
+                            st.plotly_chart(fig_base, use_container_width=True)
+                            if cfg["nota"]:
+                                st.caption(cfg["nota"])
 
-        ct1, ct2, _ = st.columns([1, 1, 2])
-        kpi(ct1, f"{n_cel:,}", "Celulares capturados",
-            f"{pct_cel}% de {n_term:,} enc. terminadas")
-        kpi(ct2, f"{n_cor:,}", "Correos capturados",
-            f"{pct_cor}% de {n_term:,} enc. terminadas", "azul")
+            else:
+                # ── Panel ejecutivo 2×4 ───────────────────────────────────────
+                st.markdown(
+                    '<div class="sec-title">Panel ejecutivo — evolución por semana</div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption(
+                    f"Semanas disponibles: {' · '.join(semanas_ord)}  "
+                    f"| Granularidad fija en semana para comparación consistente."
+                )
 
-        # ── Descarga ───────────────────────────────────────────────────────────
-        st.markdown("---")
-        # Excluir PII y columnas internas antes de exportar
-        cols_excluir_csv = {"tiene_celular", "tiene_correo", "terminada",
-                            "duracion_confiable", "fecha_inicio", "fecha_fin"}
-        cols_csv = [c for c in df.columns if c not in cols_excluir_csv]
-        csv_out = df[cols_csv].to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Descargar datos filtrados (CSV)", csv_out,
-            f"ceop_guerrero_{muni_sel.lower().replace(' ','_')}.csv", "text/csv"
-        )
+                for i in range(0, len(PANEL), 2):
+                    cols = st.columns(2)
+                    for j, cfg in enumerate(PANEL[i:i+2]):
+                        fig = mini_trend(
+                            cfg["base"], cfg["campo"],
+                            cfg["titulo"], cfg["opciones"],
+                            nota=cfg["nota"],
+                        )
+                        with cols[j]:
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.info(f"Sin datos: {cfg['titulo']}")
+
+                # ── Tabla de deltas semana a semana ───────────────────────────
+                st.markdown("---")
+                st.markdown(
+                    '<div class="sec-title">Análisis por pregunta — tabla de cambios</div>',
+                    unsafe_allow_html=True,
+                )
+
+                preg_opts = {cfg["titulo"]: cfg for cfg in PANEL}
+                preg_sel = st.selectbox(
+                    "Seleccionar pregunta para análisis detallado",
+                    list(preg_opts.keys()),
+                    key="evol_preg_sel",
+                )
+                cfg_sel = preg_opts[preg_sel]
+
+                # Calcular pivot con deltas
+                rows_det = []
+                for sem in semanas_ord:
+                    sub = cfg_sel["base"][cfg_sel["base"]["semana"] == sem][cfg_sel["campo"]].dropna()
+                    n = len(sub)
+                    if n == 0:
+                        continue
+                    for opc in cfg_sel["opciones"]:
+                        rows_det.append({
+                            "Opción": opc,
+                            "semana": sem,
+                            "pct": round((sub == opc).sum() / n * 100, 1),
+                            "n": n,
+                        })
+
+                if rows_det:
+                    df_det = pd.DataFrame(rows_det)
+                    pivot_det = df_det.pivot_table(
+                        index="Opción", columns="semana", values="pct"
+                    ).reindex(cfg_sel["opciones"])
+                    pivot_det = pivot_det[[s for s in semanas_ord if s in pivot_det.columns]]
+
+                    sem_cols = list(pivot_det.columns)
+                    for i in range(1, len(sem_cols)):
+                        d_col = f"Δ {sem_cols[i-1]}→{sem_cols[i]}"
+                        pivot_det[d_col] = (pivot_det[sem_cols[i]] - pivot_det[sem_cols[i-1]]).round(1)
+
+                    def color_delta(val):
+                        if pd.isna(val): return ""
+                        if val > 0:  return "color:#155724;font-weight:600"
+                        if val < 0:  return "color:#721C24;font-weight:600"
+                        return "color:#555"
+
+                    fmt = {c: "{:.1f}%" for c in sem_cols}
+                    fmt.update({c: "{:+.1f}pp" for c in pivot_det.columns if c.startswith("Δ")})
+                    d_cols = [c for c in pivot_det.columns if c.startswith("Δ")]
+
+                    # n por semana como fila de contexto
+                    n_row = df_det.groupby("semana")["n"].first().reindex(semanas_ord)
+                    n_df  = pd.DataFrame([["n (encuestas)"] + [
+                        f"{int(n_row[s]):,}" if s in n_row and pd.notna(n_row[s]) else "—"
+                        for s in sem_cols
+                    ] + [""] * len(d_cols)],
+                    columns=["Opción"] + sem_cols + d_cols)
+
+                    st.dataframe(
+                        pivot_det.reset_index().style
+                        .format(fmt, na_rep="—")
+                        .map(color_delta, subset=d_cols)
+                        .set_properties(**{"font-family": "IBM Plex Sans", "font-size": "13px"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                    # Fila de n como caption
+                    n_labels = "  |  ".join(
+                        f"**{s}**: n={int(n_row[s]):,}" for s in sem_cols
+                        if s in n_row and pd.notna(n_row[s])
+                    )
+                    st.caption(f"pp = puntos porcentuales.  🟢 Sube · 🔴 Baja  |  {n_labels}")
+                    if cfg_sel["nota"]:
+                        st.caption(cfg_sel["nota"])

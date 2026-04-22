@@ -8,6 +8,8 @@ Uso:
 import json
 import time
 import logging
+import re
+import unicodedata
 from datetime import datetime, timezone
 
 import requests
@@ -20,6 +22,30 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Normalización de nombres ───────────────────────────────────────────────────
+
+def normalizar_nombre(s: str | None) -> str:
+    """
+    Normalización agresiva para colapsar variantes del mismo nombre.
+    Pasos: strip → mayúsculas → quitar acentos → solo ASCII → espacios múltiples → 1.
+    Ejemplos:
+      "Maricela Pineda  Pita" → "MARICELA PINEDA PITA"
+      "Samir Ávila"           → "SAMIR AVILA"
+      "SAMIR AVILA"           → "SAMIR AVILA"
+    """
+    if not s or str(s).strip() in ("", "None", "nan"):
+        return "SIN NOMBRE"
+    s = str(s).strip().upper()
+    # Quitar acentos y diacríticos (ñ → N, á → A, etc.)
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    # Solo letras, números y espacios
+    s = re.sub(r"[^A-Z0-9 ]", " ", s)
+    # Colapsar espacios múltiples
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or "SIN NOMBRE"
+
 
 # ── Paginación y carga bruta ───────────────────────────────────────────────────
 
@@ -133,9 +159,14 @@ def _transform(records: list[dict]) -> pd.DataFrame:
     # Municipio → mayúsculas y strip (normalizar vs. MUNICIPIOS dict)
     df["municipio"] = df["municipio"].str.strip().str.upper()
 
-    # ID interno de encuestador (hash del nombre, hasta tener usuarios reales)
+    # Nombre encuestador — normalización agresiva para colapsar variantes
+    # (doble espacio, acentos, mayúsculas/minúsculas, caracteres especiales)
+    df["encuestador_nombre"] = df["encuestador_nombre"].apply(normalizar_nombre)
+
+    # ID interno: hash del nombre YA NORMALIZADO → variantes del mismo nombre
+    # colapsan al mismo ID en lugar de generar filas separadas
     df["encuestador_id"] = df["encuestador_nombre"].apply(
-        lambda x: str(abs(hash(str(x)))) if pd.notna(x) else "sin_nombre"
+        lambda x: str(abs(hash(x)))
     )
 
     # Columnas P11 → booleano: tiene valor = True

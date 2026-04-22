@@ -16,7 +16,7 @@ UMBRAL_AMARILLO  = 15
 DUR_MIN_MIN      = 5
 DUR_MAX_MIN      = 20
 AUTO_REFRESH_SEC = 300
-META_POR_SECCION = 10            # pendiente confirmar
+META_POR_SECCION = 20            # confirmado por stakeholder
 
 # ── Identidad visual ───────────────────────────────────────────────────────────
 VERDE    = "#2E7D5E"
@@ -199,6 +199,39 @@ MUNICIPIOS = {
 ESTADO_CENTRO = [17.5, -99.8]
 ESTADO_ZOOM   = 8
 
+# ── Semanas de operativo ───────────────────────────────────────────────────────
+# Semana 1 = 18–19 abril (arranque de fin de semana).
+# A partir del lunes 21 abril: semanas ISO lunes–domingo.
+# Levantamientos eventuales entre semana caen en la semana calendario que les
+# corresponde sin necesidad de configuración adicional.
+
+import pandas as _pd
+
+def semana_operativo(fecha) -> str:
+    """
+    Asigna una etiqueta de semana de operativo a una fecha.
+    Retorna 'S1', 'S2', 'S3', ...
+    """
+    INICIO_S1   = _pd.Timestamp("2026-04-18").date()
+    CIERRE_S1   = _pd.Timestamp("2026-04-19").date()   # domingo
+    INICIO_S2   = _pd.Timestamp("2026-04-21").date()   # lunes
+
+    if hasattr(fecha, "date"):
+        fecha = fecha.date()
+
+    if fecha <= CIERRE_S1:
+        return "S1"
+
+    # ISO week del primer lunes del operativo (S2 = semana del 21 abril)
+    iso_s2 = INICIO_S2.isocalendar()[1]
+    iso_f  = fecha.isocalendar()[1]
+    iso_yr = fecha.isocalendar()[0]
+    iso_yr_s2 = INICIO_S2.isocalendar()[0]
+
+    # Manejar cruce de año (poco probable pero correcto)
+    semana_num = (iso_yr - iso_yr_s2) * 52 + (iso_f - iso_s2) + 2
+    return f"S{max(semana_num, 2)}"
+
 # ── Coordinadores por municipio ────────────────────────────────────────────────
 # Confirmado por Ilich · 17 abril 2026
 # ⚠️  Acapulco tiene múltiples coordinadores — usar campo `coordinador` de Bubble
@@ -230,14 +263,35 @@ for _muni, _coords in COORDINADORES.items():
 
 # ── Roles (estructura lista para streamlit-authenticator) ──────────────────────
 ROLES = {
+    # ── Coordinador estatal — acceso total + Tab 3 y Tab 4 ────────────────────
     "ilich": {
         "rol":        "estatal",
         "municipios": list(MUNICIPIOS.keys()),
     },
-    # Municipales — confirmar usernames con stakeholder
-    # "ilich_lozano": { "rol": "municipal", "municipios": ["ACAPULCO DE JUAREZ"] },
-    # "samir":        { "rol": "municipal", "municipios": ["CHILPANCINGO DE LOS BRAVO"] },
-    # "elizabeth":    { "rol": "municipal", "municipios": ["IGUALA DE LA INDEPENDENCIA"] },
-    # "pilar":        { "rol": "municipal", "municipios": ["ZIHUATANEJO DE AZUETA"] },
-    # "xochitl":      { "rol": "municipal", "municipios": ["OMETEPEC"] },
+    # ── Coordinadores municipales — solo Tab 1 y Tab 2, municipio(s) asignado(s)
+    # Rol "municipal": NO puede ver Tab 3 (Perfil) ni Tab 4 (Resultados)
+    "belgica": {
+        "rol":        "municipal",
+        "municipios": ["ACAPULCO DE JUAREZ"],
+    },
+    "samir": {
+        "rol":        "municipal",
+        "municipios": ["CHILPANCINGO DE LOS BRAVO"],
+    },
+    "elizabeth": {
+        "rol":        "municipal",
+        "municipios": ["IGUALA DE LA INDEPENDENCIA"],
+    },
+    "pilar": {
+        "rol":        "municipal",
+        "municipios": ["ZIHUATANEJO DE AZUETA"],
+    },
+    "oscar": {
+        "rol":        "municipal",
+        "municipios": ["ZIHUATANEJO DE AZUETA"],
+    },
+    "xochitl": {
+        "rol":        "municipal",
+        "municipios": ["OMETEPEC", "SAN MARCOS", "AYUTLA DE LOS LIBRES"],
+    },
 }
