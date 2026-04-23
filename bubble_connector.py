@@ -23,6 +23,12 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+# ── Constantes de corte temporal ──────────────────────────────────────────────
+# A partir de esta fecha los encuestadores usan login individual en Bubble.
+# Los registros anteriores usan hash(nombre_normalizado) como encuestador_id.
+# Los registros de esta fecha en adelante usan Created By (ID estable de Bubble).
+INICIO_LOGIN_BUBBLE = pd.Timestamp("2026-04-25").date()
+
 # ── Normalización de nombres ───────────────────────────────────────────────────
 
 def normalizar_nombre(s: str | None) -> str:
@@ -115,6 +121,10 @@ def _transform(records: list[dict]) -> pd.DataFrame:
         # Campos de contacto como booleanos — PII nunca sale del transform
         row["tiene_celular"] = bool(r.get("celular_encuestado"))
         row["tiene_correo"]  = bool(r.get("email_encuestado"))
+        # Email del encuestador (perfil Bubble) — no es PII del entrevistado
+        row["encuestador_email"] = r.get("email_encuestador", "")
+        # ID de usuario Bubble — usado como encuestador_id desde INICIO_LOGIN_BUBBLE
+        row["_created_by"] = r.get("Created By", "")
         rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -163,11 +173,20 @@ def _transform(records: list[dict]) -> pd.DataFrame:
     # (doble espacio, acentos, mayúsculas/minúsculas, caracteres especiales)
     df["encuestador_nombre"] = df["encuestador_nombre"].apply(normalizar_nombre)
 
-    # ID interno: hash del nombre YA NORMALIZADO → variantes del mismo nombre
-    # colapsan al mismo ID en lugar de generar filas separadas
-    df["encuestador_id"] = df["encuestador_nombre"].apply(
-        lambda x: str(abs(hash(x)))
-    )
+    # ID de encuestador — lógica dual según período:
+    # · Antes del 25 abril (texto libre): hash del nombre normalizado
+    # · Desde el 25 abril (login Bubble): Created By — estable, único por usuario
+    # Esto permite que ambos períodos coexistan sin mezclar identidades.
+    def _enc_id(row):
+        if row["fecha"] is not None and row["fecha"] >= INICIO_LOGIN_BUBBLE:
+            cb = str(row.get("_created_by", "")).strip()
+            if cb and cb not in ("", "None"):
+                return cb
+        return str(abs(hash(row["encuestador_nombre"])))
+
+    df["encuestador_id"] = df.apply(_enc_id, axis=1)
+    # _created_by fue auxiliar — no lo exponemos fuera del conector
+    df.drop(columns=["_created_by"], inplace=True)
 
     # Columnas P11 → booleano: tiene valor = True
     p11_cols = [
@@ -330,6 +349,40 @@ if __name__ == "__main__":
     # ── Registros por fecha de campo ──────────────────────────────────────────
     print("\n── Registros por fecha de campo ─────────────────")
     print(df[df["terminada"]]["fecha"].value_counts().sort_index())
+
+    # ── Origen de encuestador_id ───────────────────────────────────────────────
+    # Diagnóstico para verificar que el login individual de Bubble está funcionando.
+    # Desde el 25 abril los IDs deberían venir de Created By (largo ~40 chars),
+    # no del hash del nombre (numérico). Si post-25 abril hay muchos hashes,
+    # revisar que Created By esté llegando en los registros nuevos.
+    print(f"\n── Origen de encuestador_id (corte: {INICIO_LOGIN_BUBBLE}) ──────────")
+    if total:
+        df_nuevo    = df[df["fecha"] >= INICIO_LOGIN_BUBBLE]
+        df_historico = df[df["fecha"] < INICIO_LOGIN_BUBBLE]
+
+        # Created By llega como string largo tipo '1776902705528x187...'
+        # El hash es numérico puro. Distinguimos por si contiene 'x'.
+        def _es_created_by(enc_id: str) -> bool:
+            return "x" in str(enc_id)
+
+        n_nuevo      = len(df_nuevo)
+        n_historico  = len(df_historico)
+        n_login      = df_nuevo["encuestador_id"].apply(_es_created_by).sum() if n_nuevo else 0
+        n_hash_nuevo = n_nuevo - n_login
+
+        print(f"  Registros históricos (<25 abr) : {n_historico:>6}  → hash nombre (esperado)")
+        print(f"  Registros nuevos    (≥25 abr)  : {n_nuevo:>6}")
+        if n_nuevo:
+            print(f"    ✅ Created By (login Bubble) : {n_login:>6}  ({n_login/n_nuevo*100:.1f}%)")
+            print(f"    ⚠️  Hash nombre (sin login)   : {n_hash_nuevo:>6}  ({n_hash_nuevo/n_nuevo*100:.1f}%)")
+            if n_hash_nuevo > 0:
+                print("    → Revisar: estos encuestadores no tienen Created By en sus registros.")
+                sin_login = df_nuevo[~df_nuevo["encuestador_id"].apply(_es_created_by)]
+                print("      Nombres afectados:")
+                for nombre in sin_login["encuestador_nombre"].unique():
+                    print(f"        · {nombre}")
+    else:
+        print("  Sin registros para analizar.")
 
     bc.st = _orig
     print("\n✅ Prueba completada.")
