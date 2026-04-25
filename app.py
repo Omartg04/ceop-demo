@@ -1076,7 +1076,9 @@ if tab4 is not None:
           st.markdown('<div class="sec-title">Evolución semanal de percepciones</div>',
                       unsafe_allow_html=True)
 
-          df_trend = df.copy()
+          # Tab 5 ignora el filtro de fechas del sidebar — siempre muestra
+          # la evolución completa del operativo. Sí respeta municipio/coordinador.
+          df_trend = df_raw.copy()
           df_trend["semana"] = df_trend["fecha"].apply(semana_operativo)
           semanas_disp = sorted(df_trend["semana"].unique(), key=lambda s: int(s[1:]))
 
@@ -1319,7 +1321,8 @@ if tab5 is not None:
             st.info("Sin registros para los filtros seleccionados.")
         else:
             # ── Preparar columna de semana ─────────────────────────────────────
-            df_ev = df.copy()
+            # Tab 5 ignora filtro de fechas — usa df_raw completo
+            df_ev = df_raw.copy()
             df_ev["semana"] = df_ev["fecha"].apply(semana_operativo)
             semanas_ord = sorted(df_ev["semana"].unique(), key=lambda s: int(s[1:]))
 
