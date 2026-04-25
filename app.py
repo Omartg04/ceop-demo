@@ -468,17 +468,24 @@ else:
 
 
 
-# ── Función global de semana operativa (sábado → viernes) ────────────────────
-# Disponible para todos los tabs. Tab 1 usa su propia copia local (inicio_semana_op)
-# por razones históricas; Tab 5 usa esta versión global.
+# ── Función global de semana operativa ───────────────────────────────────────
+# Devuelve etiqueta tipo "S1", "S2", etc.
+# S1 = 18–19 abril (fin de semana de arranque)
+# S2 en adelante = semana calendario que contiene la fecha
+import datetime as _dt_global
+_INICIO_OPERATIVO = _dt_global.date(2026, 4, 18)
+
 def semana_operativo(fecha):
-    """Devuelve el sábado que abre la semana operativa de `fecha`."""
-    import datetime as _dt2
-    dow = fecha.isoweekday()
-    if dow == 6:
-        return fecha
-    dias_atras = (dow % 7) + 1 if dow != 7 else 1
-    return fecha - _dt2.timedelta(days=dias_atras)
+    """Devuelve etiqueta de semana operativa ('S1', 'S2', ...) para una fecha."""
+    if fecha is None:
+        return "S?"
+    # S1: 18–19 abril (sábado y domingo de arranque)
+    if fecha <= _dt_global.date(2026, 4, 19):
+        return "S1"
+    # S2 en adelante: semanas ISO a partir del lunes 21 abril
+    delta = (fecha - _dt_global.date(2026, 4, 21)).days
+    semana_num = (delta // 7) + 2  # S2 arranca el 21 abril
+    return f"S{semana_num}"  
 
 
 # ══════════════════════════════════════════════════════════════════════════════
