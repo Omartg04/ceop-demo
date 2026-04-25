@@ -23,7 +23,7 @@ from config import (
     META_DIA, UMBRAL_AMARILLO, DUR_MIN_MIN, DUR_MAX_MIN,
     META_POR_SECCION, AUTO_REFRESH_SEC, MUNICIPIOS, ESTADO_CENTRO,
     ESTADO_ZOOM, OPCIONES, COORDINADORES, MUNICIPIOS_POR_COORDINADOR,
-    TODOS_COORDINADORES, ROLES,
+    TODOS_COORDINADORES, ROLES, semana_operativo,
 )
 from seccion_distrito_lookup import SECCION_DISTRITO, DISTRITOS_POR_MUNICIPIO
 from bubble_connector import get_encuestas, normalizar_nombre
@@ -466,27 +466,6 @@ else:
     tab4 = None
     tab5 = None
 
-
-
-# ── Función global de semana operativa ───────────────────────────────────────
-# Devuelve etiqueta tipo "S1", "S2", etc.
-# S1 = 18–19 abril (fin de semana de arranque)
-# S2 en adelante = semana calendario que contiene la fecha
-import datetime as _dt_global
-_INICIO_OPERATIVO = _dt_global.date(2026, 4, 18)
-
-def semana_operativo(fecha):
-    """Devuelve etiqueta de semana operativa ('S1', 'S2', ...) para una fecha.
-    Semana operativa: sábado → viernes.
-    S1 = 18–24 abril · S2 = 25 abril–1 mayo · S3 en adelante automático.
-    """
-    if fecha is None:
-        return "S?"
-    # Ancla: sábado 18 abril = inicio de S1
-    ANCLA = _dt_global.date(2026, 4, 18)
-    delta = (fecha - ANCLA).days
-    semana_num = (delta // 7) + 1
-    return f"S{semana_num}"  
 
 
 # ══════════════════════════════════════════════════════════════════════════════
