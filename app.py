@@ -476,15 +476,16 @@ import datetime as _dt_global
 _INICIO_OPERATIVO = _dt_global.date(2026, 4, 18)
 
 def semana_operativo(fecha):
-    """Devuelve etiqueta de semana operativa ('S1', 'S2', ...) para una fecha."""
+    """Devuelve etiqueta de semana operativa ('S1', 'S2', ...) para una fecha.
+    Semana operativa: sábado → viernes.
+    S1 = 18–24 abril · S2 = 25 abril–1 mayo · S3 en adelante automático.
+    """
     if fecha is None:
         return "S?"
-    # S1: 18–19 abril (sábado y domingo de arranque)
-    if fecha <= _dt_global.date(2026, 4, 19):
-        return "S1"
-    # S2 en adelante: semanas ISO a partir del lunes 21 abril
-    delta = (fecha - _dt_global.date(2026, 4, 21)).days
-    semana_num = (delta // 7) + 2  # S2 arranca el 21 abril
+    # Ancla: sábado 18 abril = inicio de S1
+    ANCLA = _dt_global.date(2026, 4, 18)
+    delta = (fecha - ANCLA).days
+    semana_num = (delta // 7) + 1
     return f"S{semana_num}"  
 
 
