@@ -23,7 +23,7 @@ from config import (
     META_DIA, UMBRAL_AMARILLO, DUR_MIN_MIN, DUR_MAX_MIN,
     META_POR_SECCION, AUTO_REFRESH_SEC, MUNICIPIOS, ESTADO_CENTRO,
     ESTADO_ZOOM, OPCIONES, COORDINADORES, MUNICIPIOS_POR_COORDINADOR,
-    TODOS_COORDINADORES, ROLES,
+    TODOS_COORDINADORES, ROLES, semana_operativo,
 )
 from seccion_distrito_lookup import SECCION_DISTRITO, DISTRITOS_POR_MUNICIPIO
 from bubble_connector import get_encuestas, normalizar_nombre
