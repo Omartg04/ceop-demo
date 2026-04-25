@@ -23,7 +23,7 @@ from config import (
     META_DIA, UMBRAL_AMARILLO, DUR_MIN_MIN, DUR_MAX_MIN,
     META_POR_SECCION, AUTO_REFRESH_SEC, MUNICIPIOS, ESTADO_CENTRO,
     ESTADO_ZOOM, OPCIONES, COORDINADORES, MUNICIPIOS_POR_COORDINADOR,
-    TODOS_COORDINADORES, ROLES, semana_operativo,
+    TODOS_COORDINADORES, ROLES,
 )
 from seccion_distrito_lookup import SECCION_DISTRITO, DISTRITOS_POR_MUNICIPIO
 from bubble_connector import get_encuestas, normalizar_nombre
@@ -466,6 +466,19 @@ else:
     tab4 = None
     tab5 = None
 
+
+
+# ── Función global de semana operativa (sábado → viernes) ────────────────────
+# Disponible para todos los tabs. Tab 1 usa su propia copia local (inicio_semana_op)
+# por razones históricas; Tab 5 usa esta versión global.
+def semana_operativo(fecha):
+    """Devuelve el sábado que abre la semana operativa de `fecha`."""
+    import datetime as _dt2
+    dow = fecha.isoweekday()
+    if dow == 6:
+        return fecha
+    dias_atras = (dow % 7) + 1 if dow != 7 else 1
+    return fecha - _dt2.timedelta(days=dias_atras)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
