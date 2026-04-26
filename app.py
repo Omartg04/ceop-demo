@@ -366,8 +366,20 @@ f_ini, f_fin = f_ini_global, f_fin_global
 
 df = df_raw.copy()
 
-# Coordinador → filtra por municipios asignados
-if coord_sel != "Todos los coordinadores":
+# Coordinador municipal — filtro por nombre en campo `coordinador` de Bubble.
+# Este filtro se aplica ANTES que cualquier KPI, mapa o tab.
+# Es la fuente de verdad: un coordinador solo ve registros donde su nombre
+# aparece en el campo `coordinador`, independientemente del municipio.
+if _rol == "municipal" and bubble_tiene_coordinador:
+    _nombre_coord_norm = normalizar_nombre(st.session_state.get("name", ""))
+    _mask_coord = df["coordinador"].apply(normalizar_nombre) == _nombre_coord_norm
+    if _mask_coord.any():
+        df = df[_mask_coord].copy()
+    # Si no hay match (campo coordinador vacío o inconsistente), se mantiene df
+    # sin filtrar y el Tab 1 mostrará la advertencia de fallback.
+
+# Coordinador estatal filtrando por dropdown de coordinador
+if _rol == "estatal" and coord_sel != "Todos los coordinadores":
     if bubble_tiene_coordinador:
         df = df[df["coordinador"] == coord_sel]
     else:
@@ -520,20 +532,20 @@ with tab1:
     if total == 0:
         st.info("Sin registros para los filtros seleccionados.")
     else:
-        # ── Filtro de coordinador por rol ─────────────────────────────────────
+        # df ya viene filtrado por coordinador desde el bloque global de filtros.
+        # df_t1 es simplemente df — no hay que volver a filtrar aquí.
+        df_t1 = df.copy()
+
+        # Advertencia si el campo coordinador no tiene datos (fallback activo)
         if _rol == "municipal" and bubble_tiene_coordinador:
-            _nombre_coord = normalizar_nombre(st.session_state.get("name", ""))
-            df_t1 = df[df["coordinador"].apply(normalizar_nombre) == _nombre_coord].copy()
-            if df_t1.empty:
+            _nombre_coord_norm = normalizar_nombre(st.session_state.get("name", ""))
+            _tiene_match = df["coordinador"].apply(normalizar_nombre).eq(_nombre_coord_norm).any()
+            if not _tiene_match and not df.empty:
                 st.warning(
                     f"No se encontraron registros con coordinador "
-                    f"**'{_nombre_coord}'** en Bubble. "
-                    "Verifica que el campo `coordinador` esté capturado correctamente. "
-                    "Mostrando todos los registros del municipio como respaldo."
+                    f"**'{_nombre_coord_norm}'** en Bubble. "
+                    "Verifica que el campo `coordinador` esté capturado correctamente."
                 )
-                df_t1 = df.copy()
-        else:
-            df_t1 = df.copy()
 
         # ── Añadir semana operativa al dataframe ──────────────────────────────
         df_t1 = df_t1.copy()
