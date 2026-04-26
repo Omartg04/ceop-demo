@@ -113,6 +113,22 @@ OPCIONES = {
 
 # ── Jerarquía territorial ──────────────────────────────────────────────────────
 MUNICIPIOS = {
+    "TELOLOAPAN": {
+        "clave_ini": None,
+        "geojson":   "secciones_teloloapan.geojson",
+        "secciones": None,
+        "distritos": [],
+        "centro":    [18.354, -99.876],
+        "zoom":      12,
+    },
+    "COYUCA DE BENITEZ": {
+        "clave_ini": None,
+        "geojson":   "secciones_coyuca.geojson",
+        "secciones": None,
+        "distritos": [],
+        "centro":    [17.017, -100.082],
+        "zoom":      12,
+    },
     "ACAPULCO DE JUAREZ": {
         "clave_ini": 1,
         "geojson":   "secciones_acapulco.geojson",
@@ -210,27 +226,19 @@ import pandas as _pd
 def semana_operativo(fecha) -> str:
     """
     Asigna una etiqueta de semana de operativo a una fecha.
+    Semana operativa: sábado → viernes.
+    S1 = 18–24 abril · S2 = 25 abril–1 mayo · S3 en adelante automático.
     Retorna 'S1', 'S2', 'S3', ...
     """
-    INICIO_S1   = _pd.Timestamp("2026-04-18").date()
-    CIERRE_S1   = _pd.Timestamp("2026-04-19").date()   # domingo
-    INICIO_S2   = _pd.Timestamp("2026-04-21").date()   # lunes
+    import datetime as _dt
+    ANCLA = _dt.date(2026, 4, 18)  # sábado de inicio del operativo
 
     if hasattr(fecha, "date"):
         fecha = fecha.date()
 
-    if fecha <= CIERRE_S1:
-        return "S1"
-
-    # ISO week del primer lunes del operativo (S2 = semana del 21 abril)
-    iso_s2 = INICIO_S2.isocalendar()[1]
-    iso_f  = fecha.isocalendar()[1]
-    iso_yr = fecha.isocalendar()[0]
-    iso_yr_s2 = INICIO_S2.isocalendar()[0]
-
-    # Manejar cruce de año (poco probable pero correcto)
-    semana_num = (iso_yr - iso_yr_s2) * 52 + (iso_f - iso_s2) + 2
-    return f"S{max(semana_num, 2)}"
+    delta = (fecha - ANCLA).days
+    semana_num = (delta // 7) + 1
+    return f"S{max(semana_num, 1)}"
 
 # ── Coordinadores por municipio ────────────────────────────────────────────────
 # Confirmado por Ilich · 17 abril 2026
@@ -293,5 +301,17 @@ ROLES = {
     "xochitl": {
         "rol":        "municipal",
         "municipios": ["OMETEPEC", "SAN MARCOS", "AYUTLA DE LOS LIBRES"],
+    },
+    "serapio": {
+        "rol":        "municipal",
+        "municipios": ["TELOLOAPAN"],
+    },
+    "bresne": {
+        "rol":        "municipal",
+        "municipios": ["IGUALA DE LA INDEPENDENCIA"],
+    },
+    "roberto": {
+        "rol":        "municipal",
+        "municipios": ["ACAPULCO DE JUAREZ", "COYUCA DE BENITEZ"],
     },
 }
