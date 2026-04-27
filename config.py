@@ -331,6 +331,10 @@ ROLES = {
         "rol":        "municipal",
         "municipios": ["OMETEPEC", "SAN MARCOS", "AYUTLA DE LOS LIBRES"],
     },
+    "ossiel": {
+        "rol":        "municipal",
+        "municipios": ["ACAPULCO DE JUAREZ"],
+    },
     "serapio": {
         "rol":        "municipal",
         "municipios": ["TELOLOAPAN"],
