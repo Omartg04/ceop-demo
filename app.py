@@ -319,18 +319,25 @@ with st.sidebar:
         f_fin_global = dia_sel
 
     elif modo_tiempo == "📆 Semana":
-        semanas_sb = sorted(set(_inicio_semana_sb(f) for f in fechas_disp), reverse=True)
-        semana_sb_sel = st.selectbox(
-            "Semana operativa",
-            options=semanas_sb,
-            format_func=lambda d: (
-                f"{d.strftime('%d %b')} – "
-                f"{(d + _dt_sb.timedelta(days=6)).strftime('%d %b %Y')}"
-            ),
-            key="semana_sb_sel",
-        )
-        f_ini_global = semana_sb_sel
-        f_fin_global = semana_sb_sel + _dt_sb.timedelta(days=6)
+        if fechas_disp:
+            semanas_sb = sorted(set(_inicio_semana_sb(f) for f in fechas_disp), reverse=True)
+            semana_sb_sel = st.selectbox(
+                "Semana operativa",
+                options=semanas_sb,
+                format_func=lambda d: (
+                    f"{d.strftime('%d %b')} – "
+                    f"{(d + _dt_sb.timedelta(days=6)).strftime('%d %b %Y')}"
+                ),
+                key="semana_sb_sel",
+            )
+            f_ini_global = semana_sb_sel
+            f_fin_global = semana_sb_sel + _dt_sb.timedelta(days=6)
+        else:
+            # Sin datos aún — mostrar semana actual como placeholder
+            hoy = date.today()
+            f_ini_global = _inicio_semana_sb(hoy)
+            f_fin_global = f_ini_global + _dt_sb.timedelta(days=6)
+            st.caption("Sin datos disponibles aún.")
 
     else:  # Acumulado
         st.caption(f"Operativo completo: {f_min.strftime('%d %b')} – {f_max.strftime('%d %b %Y')}")
