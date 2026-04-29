@@ -335,6 +335,10 @@ ROLES = {
         "rol":        "municipal",
         "municipios": ["ACAPULCO DE JUAREZ"],
     },
+    "julio": {
+        "rol":        "municipal",
+        "municipios": ["TLAPA DE COMONFORT"],
+    },
     "serapio": {
         "rol":        "municipal",
         "municipios": ["TELOLOAPAN"],
