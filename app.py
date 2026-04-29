@@ -373,10 +373,9 @@ df = df_raw.copy()
 if _rol == "municipal" and bubble_tiene_coordinador:
     _nombre_coord_norm = normalizar_nombre(st.session_state.get("name", ""))
     _mask_coord = df["coordinador"].apply(normalizar_nombre) == _nombre_coord_norm
-    if _mask_coord.any():
-        df = df[_mask_coord].copy()
-    # Si no hay match (campo coordinador vacío o inconsistente), se mantiene df
-    # sin filtrar y el Tab 1 mostrará la advertencia de fallback.
+    # Siempre filtrar — si no hay match, df queda vacío (correcto).
+    # Un coordinador sin encuestadores no debe ver datos de otros.
+    df = df[_mask_coord].copy()
 
 # Coordinador estatal filtrando por dropdown de coordinador
 if _rol == "estatal" and coord_sel != "Todos los coordinadores":
