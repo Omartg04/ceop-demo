@@ -286,9 +286,10 @@ with st.sidebar:
     # ── Filtro temporal — tres modos ───────────────────────────────────────────
     if not df_raw.empty and "fecha" in df_raw.columns:
         fechas_disp = sorted(df_raw["fecha"].dropna().unique())
-        f_min = fechas_disp[0]
-        f_max = fechas_disp[-1]
+        f_min = fechas_disp[0] if fechas_disp else date.today()
+        f_max = fechas_disp[-1] if fechas_disp else date.today()
     else:
+        fechas_disp = []
         f_min = f_max = date.today()
 
     import datetime as _dt_sb
