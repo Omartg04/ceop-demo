@@ -190,7 +190,7 @@ MUNICIPIOS = {
         "clave_ini": 28,
         "geojson":   "secciones_chilapa.geojson",
         "secciones": 85,
-        "distritos": [],
+        "distritos": [25],
         "centro":    [17.501, -99.075],
         "zoom":      12,
     },
@@ -198,7 +198,7 @@ MUNICIPIOS = {
         "clave_ini": 67,
         "geojson":   "secciones_tlapa.geojson",
         "secciones": 36,
-        "distritos": [],
+        "distritos": [27],
         "centro":    [17.529, -98.618],
         "zoom":      12,
     },
@@ -206,7 +206,7 @@ MUNICIPIOS = {
         "clave_ini": 57,
         "geojson":   "secciones_ayutla.geojson",
         "secciones": 39,
-        "distritos": [],
+        "distritos": [13],
         "centro":    [16.973, -99.303],
         "zoom":      12,
     },
@@ -214,7 +214,7 @@ MUNICIPIOS = {
         "clave_ini": 60,
         "geojson":   "secciones_tepecoacuilco.geojson",
         "secciones": 31,
-        "distritos": [],
+        "distritos": [23],
         "centro":    [18.133, -99.482],
         "zoom":      12,
     },
@@ -222,7 +222,7 @@ MUNICIPIOS = {
         "clave_ini": 56,
         "geojson":   "secciones_taxco.geojson",
         "secciones": 89,
-        "distritos": [],
+        "distritos": [21],
         "centro":    [18.504, -99.598],
         "zoom":      12,
     },
@@ -230,9 +230,17 @@ MUNICIPIOS = {
         "clave_ini": 35,
         "geojson":   "secciones_huitzuco.geojson",
         "secciones": 36,
-        "distritos": [],
+        "distritos": [23],
         "centro":    [18.180, -99.268],
         "zoom":      12,
+    },
+    "PUNGARABATO": {
+        "clave_ini": 50,
+        "geojson":   "secciones_pungarabato.geojson",
+        "secciones": 15,
+        "distritos": [21],
+        "centro":    [18.717, -100.608],
+        "zoom":      13,
     },
 }
 
@@ -271,7 +279,7 @@ def semana_operativo(fecha) -> str:
 COORDINADORES = {
     "ACAPULCO DE JUAREZ":         ["Ilich Lozano", "Alma Jessica Perez Vargas"],
     "CHILPANCINGO DE LOS BRAVO":  ["Samir Ávila"],
-    "IGUALA DE LA INDEPENDENCIA": ["Elizabeth Figueroa Helguera"],
+    "IGUALA DE LA INDEPENDENCIA": ["Elizabeth Figueroa Elguera"],
     "ZIHUATANEJO DE AZUETA":      ["Pilar Pérez Gutiérrez"],
     "OMETEPEC":                   ["Xochitl Jiménez Pita"],
     "PETATLAN":                   ["Sin asignar"],
@@ -284,6 +292,7 @@ COORDINADORES = {
     "HUITZUCO DE LOS FIGUEROA":   ["Sin asignar"],
     "TELOLOAPAN":                 ["Serapio Navarro Rayo"],
     "COYUCA DE BENITEZ":          ["Jose Roberto Sanchez Rios"],
+    "PUNGARABATO":                ["Serapio Navarro Rayo"],
 }
 
 # Lista plana de todos los coordinadores (para el dropdown del sidebar)
@@ -341,7 +350,7 @@ ROLES = {
     },
     "serapio": {
         "rol":        "municipal",
-        "municipios": ["TELOLOAPAN"],
+        "municipios": ["TELOLOAPAN", "TEPECOACUILCO DE TRUJANO", "PUNGARABATO"],
     },
     "bresne": {
         "rol":        "municipal",
