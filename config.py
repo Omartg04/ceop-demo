@@ -8,7 +8,7 @@ Editar aquí — no tocar app.py para cambiar umbrales o mapeos.
 BUBBLE_BASE_URL = "https://encuestaopguerrero.bubbleapps.io/api/1.1"
 BUBBLE_ENDPOINT = f"{BUBBLE_BASE_URL}/obj/Encuesta"
 BUBBLE_PAGE_SIZE = 100
-CACHE_TTL_SEC    = 300           # 5 minutos
+CACHE_TTL_SEC    = 3600          # 1 hora — confirmado 15 mayo 2026
 
 # ── Parámetros operativos ──────────────────────────────────────────────────────
 META_DIA         = 20
