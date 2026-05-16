@@ -163,7 +163,8 @@ DATA_DIR = Path(__file__).parent / "data" / "geojsons"
 # Rol estatal: pasa None → recibe todos los municipios
 # Rol municipal: pasa lista → Bubble filtra en origen
 _filtro_munis = None if _rol == "estatal" else _munis_permitidos
-df_raw, ultima_actualizacion = get_encuestas(API_KEY, municipios=_filtro_munis)
+with st.spinner("Cargando datos del operativo…"):
+    df_raw, ultima_actualizacion = get_encuestas(API_KEY, municipios=_filtro_munis)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -898,11 +899,11 @@ with tab2:
 
         # Agregar total de secciones por municipio desde config
         muni_resumen["total_secs"] = muni_resumen["municipio"].map(
-            lambda m: MUNICIPIOS.get(m, {}).get("secciones") or "—"
+            lambda m: str(MUNICIPIOS.get(m, {}).get("secciones") or "—")
         )
         muni_resumen["cobertura"] = muni_resumen.apply(
-            lambda r: f"{round(r['secciones'] / r['total_secs'] * 100, 1)}%"
-            if isinstance(r["total_secs"], int) and r["total_secs"] > 0 else "—", axis=1
+            lambda r: f"{round(r['secciones'] / int(r['total_secs']) * 100, 1)}%"
+            if r["total_secs"] not in ("—", "0", "") else "—", axis=1
         )
 
         def color_muni_enc(val):
