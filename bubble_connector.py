@@ -17,8 +17,10 @@ Uso:
 import json
 import time
 import logging
+import math
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import requests
@@ -59,44 +61,84 @@ def normalizar_nombre(s: str | None) -> str:
 
 # ── Paginación bruta ───────────────────────────────────────────────────────────
 
+MAX_WORKERS = 10  # hilos paralelos — no superar 15 con Bubble
+
+
+def _fetch_single_page(api_key: str, constraints: list[dict], cursor: int) -> tuple[int, list[dict]]:
+    """
+    Descarga una sola página con back-off exponencial (máx 3 intentos).
+    Devuelve (cursor, resultados) para poder reensamblar en orden.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"}
+    params  = {
+        "limit":       BUBBLE_PAGE_SIZE,
+        "cursor":      cursor,
+        "constraints": json.dumps(constraints),
+    }
+    for intento in range(3):
+        try:
+            resp = requests.get(BUBBLE_ENDPOINT, headers=headers, params=params, timeout=15)
+            resp.raise_for_status()
+            results = resp.json().get("response", {}).get("results", [])
+            return cursor, results
+        except requests.RequestException as e:
+            if intento == 2:
+                logger.error("Bubble API error en cursor %d tras 3 intentos: %s", cursor, e)
+                raise
+            time.sleep(2 ** (intento + 1))
+    return cursor, []  # nunca llega aquí
+
+
 def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
     """
     Descarga todas las páginas de Bubble que cumplan los constraints dados.
-    Reintento con back-off exponencial (máx 3 intentos).
+
+    Estrategia paralela:
+    1. Página 0 en serie → obtiene `count` total y primeros registros.
+    2. Calcula los cursores restantes.
+    3. Lanza todas las páginas restantes en paralelo (MAX_WORKERS hilos).
+    4. Reensambla en orden de cursor para reproducibilidad.
+
+    Con 29K registros y 10 hilos: ~25-40 seg en red celular vs ~4 min en serie.
     """
-    headers  = {"Authorization": f"Bearer {api_key}"}
-    params   = {
-        "limit":       BUBBLE_PAGE_SIZE,
-        "cursor":      0,
-        "constraints": json.dumps(constraints),
-    }
-    results  = []
-    intentos = 0
+    headers = {"Authorization": f"Bearer {api_key}"}
 
-    while True:
-        try:
-            resp = requests.get(
-                BUBBLE_ENDPOINT, headers=headers, params=params, timeout=15
-            )
-            resp.raise_for_status()
-            intentos = 0
-        except requests.RequestException as e:
-            intentos += 1
-            if intentos >= 3:
-                logger.error("Bubble API error tras 3 intentos: %s", e)
-                raise
-            time.sleep(2 ** intentos)
-            continue
+    # — Página 0 en serie para obtener el count total —
+    resp0 = requests.get(
+        BUBBLE_ENDPOINT,
+        headers=headers,
+        params={"limit": BUBBLE_PAGE_SIZE, "cursor": 0, "constraints": json.dumps(constraints)},
+        timeout=15,
+    )
+    resp0.raise_for_status()
+    body0     = resp0.json().get("response", {})
+    results   = body0.get("results", [])
+    count     = body0.get("count", len(results))
+    remaining = body0.get("remaining", 0)
 
-        data      = resp.json().get("response", {})
-        chunk     = data.get("results", [])
-        remaining = data.get("remaining", 0)
-        results.extend(chunk)
-        print(f"  Bubble: {len(results)} registros descargados...", flush=True)
+    print(f"  Bubble: {len(results)}/{count} registros...", flush=True)
 
-        if remaining == 0:
-            break
-        params["cursor"] += len(chunk)
+    if remaining == 0:
+        return results
+
+    # — Cursores restantes —
+    cursors = list(range(BUBBLE_PAGE_SIZE, count, BUBBLE_PAGE_SIZE))
+
+    # — Descarga paralela —
+    pages: dict[int, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(_fetch_single_page, api_key, constraints, c): c
+            for c in cursors
+        }
+        for future in as_completed(futures):
+            cursor, page_results = future.result()
+            pages[cursor] = page_results
+            print(f"  Bubble: {len(results) + sum(len(v) for v in pages.values())}/{count} registros...", flush=True)
+
+    # — Reensamble en orden —
+    for cursor in sorted(pages.keys()):
+        results.extend(pages[cursor])
 
     return results
 
