@@ -93,9 +93,10 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
     """
     Descarga todas las páginas de Bubble que cumplan los constraints dados.
 
-    Estrategia paralela:
-    1. Página 0 en serie → obtiene `count` total y primeros registros.
-    2. Calcula los cursores restantes.
+    Estrategia:
+    1. Página 0 en serie → obtiene `remaining` real y primeros registros.
+    2. Calcula cursores restantes usando remaining (no count — count es el
+       total de la tabla sin filtros y no sirve para calcular páginas).
     3. Lanza todas las páginas restantes en paralelo (MAX_WORKERS hilos).
     4. Reensambla en orden de cursor para reproducibilidad.
 
@@ -103,7 +104,7 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
     """
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    # — Página 0 en serie para obtener el count total —
+    # — Página 0 en serie para obtener remaining real —
     resp0 = requests.get(
         BUBBLE_ENDPOINT,
         headers=headers,
@@ -113,16 +114,16 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
     resp0.raise_for_status()
     body0     = resp0.json().get("response", {})
     results   = body0.get("results", [])
-    count     = body0.get("count", len(results))
     remaining = body0.get("remaining", 0)
+    total_est = len(results) + remaining
 
-    print(f"  Bubble: {len(results)}/{count} registros...", flush=True)
+    print(f"  Bubble: {len(results)}/{total_est} registros...", flush=True)
 
     if remaining == 0:
         return results
 
-    # — Cursores restantes —
-    cursors = list(range(BUBBLE_PAGE_SIZE, count, BUBBLE_PAGE_SIZE))
+    # — Cursores restantes basados en remaining —
+    cursors = list(range(BUBBLE_PAGE_SIZE, total_est, BUBBLE_PAGE_SIZE))
 
     # — Descarga paralela —
     pages: dict[int, list[dict]] = {}
@@ -134,7 +135,8 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
         for future in as_completed(futures):
             cursor, page_results = future.result()
             pages[cursor] = page_results
-            print(f"  Bubble: {len(results) + sum(len(v) for v in pages.values())}/{count} registros...", flush=True)
+
+    print(f"  Bubble: {total_est}/{total_est} registros OK", flush=True)
 
     # — Reensamble en orden —
     for cursor in sorted(pages.keys()):
