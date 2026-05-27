@@ -288,7 +288,7 @@ COORDINADORES = {
     "TLAPA DE COMONFORT":         ["Sin asignar"],
     "AYUTLA DE LOS LIBRES":       ["Sin asignar"],
     "TEPECOACUILCO DE TRUJANO":   ["Serapio Navarro Rayo"],
-    "TAXCO DE ALARCON":           ["Sin asignar"],
+    "TAXCO DE ALARCON":           ["Caty Dominguez Barrera"],
     "HUITZUCO DE LOS FIGUEROA":   ["Sin asignar"],
     "TELOLOAPAN":                 ["Serapio Navarro Rayo"],
     "COYUCA DE BENITEZ":          ["Jose Roberto Sanchez Rios"],
@@ -359,5 +359,9 @@ ROLES = {
     "roberto": {
         "rol":        "municipal",
         "municipios": ["ACAPULCO DE JUAREZ", "COYUCA DE BENITEZ"],
+    },
+    "caty": {
+        "rol":        "municipal",
+        "municipios": ["TAXCO DE ALARCON"],
     },
 }
