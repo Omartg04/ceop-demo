@@ -903,7 +903,8 @@ with tab2:
         )
         muni_resumen["cobertura"] = muni_resumen.apply(
             lambda r: f"{round(r['secciones'] / int(r['total_secs']) * 100, 1)}%"
-            if r["total_secs"] not in ("—", "0", "") else "—", axis=1
+            if r["total_secs"] not in ("—", "0", "") else "—", axis=1,
+            result_type="reduce",
         )
 
         def color_muni_enc(val):
