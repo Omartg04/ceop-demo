@@ -242,6 +242,14 @@ MUNICIPIOS = {
         "centro":    [18.717, -100.608],
         "zoom":      13,
     },
+    "ARCELIA": {
+        "clave_ini": 7,
+        "geojson":   "secciones_arcelia.geojson",
+        "secciones": 44,
+        "distritos": [18],
+        "centro":    [18.2444, -100.1929],
+        "zoom":      12,
+    },
 }
 
 ESTADO_CENTRO = [17.5, -99.8]
@@ -279,7 +287,7 @@ def semana_operativo(fecha) -> str:
 COORDINADORES = {
     "ACAPULCO DE JUAREZ":         ["Ilich Lozano", "Alma Jessica Perez Vargas"],
     "CHILPANCINGO DE LOS BRAVO":  ["Samir Ávila"],
-    "IGUALA DE LA INDEPENDENCIA": ["Elizabeth Figueroa Elguera"],
+    "IGUALA DE LA INDEPENDENCIA": ["Elizabeth Figueroa Elguera", "Leonel Gomez Ramirez"],
     "ZIHUATANEJO DE AZUETA":      ["Pilar Pérez Gutiérrez"],
     "OMETEPEC":                   ["Xochitl Jiménez Pita"],
     "PETATLAN":                   ["Sin asignar"],
@@ -293,6 +301,7 @@ COORDINADORES = {
     "TELOLOAPAN":                 ["Serapio Navarro Rayo"],
     "COYUCA DE BENITEZ":          ["Jose Roberto Sanchez Rios"],
     "PUNGARABATO":                ["Serapio Navarro Rayo"],
+    "ARCELIA":                    ["Serapio Navarro Rayo"],
 }
 
 # Lista plana de todos los coordinadores (para el dropdown del sidebar)
@@ -350,7 +359,7 @@ ROLES = {
     },
     "serapio": {
         "rol":        "municipal",
-        "municipios": ["TELOLOAPAN", "TEPECOACUILCO DE TRUJANO", "PUNGARABATO"],
+        "municipios": ["TELOLOAPAN", "TEPECOACUILCO DE TRUJANO", "PUNGARABATO", "ARCELIA"],
     },
     "bresne": {
         "rol":        "municipal",
@@ -363,5 +372,9 @@ ROLES = {
     "caty": {
         "rol":        "municipal",
         "municipios": ["TAXCO DE ALARCON"],
+    },
+    "leonel": {
+        "rol":        "municipal",
+        "municipios": ["IGUALA DE LA INDEPENDENCIA"],
     },
 }
