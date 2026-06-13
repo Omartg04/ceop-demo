@@ -197,15 +197,78 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
     return results
 
 
+_VENTANA_DIAS = 7  # tamaño de cada ventana temporal — muy por debajo del
+                   # límite de ~50K registros de Bubble incluso con el
+                   # volumen actual (~6-7K/semana)
+
+
 def _fetch_all_raw(api_key: str) -> list[dict]:
-    """Carga completa desde el inicio del operativo."""
-    return _fetch_pages(api_key, [
-        {
-            "key":              "Created Date",
-            "constraint_type": "greater than",
-            "value":           "2026-04-17T23:59:59.000Z",
-        },
-    ])
+    """
+    Carga completa desde el inicio del operativo, dividida en ventanas
+    temporales de _VENTANA_DIAS días.
+
+    ── Por qué ventanas y no una sola consulta ─────────────────────────────
+    La Data API de Bubble tiene un límite duro: cualquier página con
+    cursor >= 50000 devuelve resultados vacíos sin error, sin importar lo
+    que indique `remaining`. Con ~55K+ registros totales y creciendo, una
+    sola consulta "Created Date > inicio_operativo" trunca exactamente en
+    50,000 registros — y como Bubble ordena por defecto de más antiguo a
+    más reciente, los registros perdidos son sistemáticamente los MÁS
+    RECIENTES (los del operativo de hoy).
+
+    Dividiendo la carga en ventanas de _VENTANA_DIAS días, cada ventana
+    individual está muy por debajo de 50K (orden de 6-7K/semana al volumen
+    actual), así que ninguna ventana sufre el truncamiento — incluyendo la
+    ventana de la semana en curso, que es la que importa para el monitoreo
+    en tiempo real.
+
+    Las ventanas se descargan en orden cronológico, de la más antigua a la
+    más reciente. Se deduplica por _id al final (defensa adicional, aunque
+    los rangos de fecha no se solapan).
+    """
+    hoy = datetime.now(timezone.utc).date()
+    inicio = INICIO_OPERATIVO
+
+    # Ventanas [inicio, inicio+7), [inicio+7, inicio+14), ... hasta cubrir
+    # un día después de "hoy" (margen para zonas horarias / registros con
+    # Created Date ligeramente adelantado en UTC).
+    ventanas: list[tuple[datetime, datetime]] = []
+    cursor_fecha = inicio
+    fin_total = hoy + pd.Timedelta(days=1)
+    while cursor_fecha <= fin_total:
+        ini_dt = datetime.combine(cursor_fecha, datetime.min.time(), tzinfo=timezone.utc)
+        fin_ventana_fecha = min(
+            cursor_fecha + pd.Timedelta(days=_VENTANA_DIAS),
+            fin_total + pd.Timedelta(days=1),
+        )
+        fin_dt = datetime.combine(fin_ventana_fecha, datetime.min.time(), tzinfo=timezone.utc)
+        ventanas.append((ini_dt, fin_dt))
+        cursor_fecha = fin_ventana_fecha
+
+    todos: dict[str, dict] = {}
+    for ini_dt, fin_dt in ventanas:
+        constraints = [
+            {
+                "key":              "Created Date",
+                "constraint_type": "greater than",
+                "value":           (ini_dt - pd.Timedelta(seconds=1)).strftime(_ISO_FMT),
+            },
+            {
+                "key":              "Created Date",
+                "constraint_type": "less than",
+                "value":           fin_dt.strftime(_ISO_FMT),
+            },
+        ]
+        logger.info("Bubble ventana %s → %s", ini_dt.date(), fin_dt.date())
+        print(f"  Bubble ventana {ini_dt.date()} → {fin_dt.date()}", flush=True)
+
+        registros = _fetch_pages(api_key, constraints)
+        for r in registros:
+            rid = r.get("_id")
+            if rid:
+                todos[rid] = r
+
+    return list(todos.values())
 
 
 def _fetch_delta_raw(api_key: str, desde: datetime) -> list[dict]:
