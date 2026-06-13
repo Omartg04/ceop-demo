@@ -29,7 +29,7 @@ import streamlit as st
 
 from config import (
     BUBBLE_ENDPOINT, BUBBLE_PAGE_SIZE,
-    CACHE_TTL_SEC, FIELD_MAP, CAMPOS_EXCLUIR,
+    CACHE_TTL_SEC, AUTO_REFRESH_SEC, FIELD_MAP, CAMPOS_EXCLUIR,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,12 @@ FECHA_BATCH_MANUAL  = pd.Timestamp("2026-04-19").date()
 INICIO_LOGIN_BUBBLE = pd.Timestamp("2026-04-25").date()
 
 _ISO_FMT = "%Y-%m-%dT%H:%M:%S.000Z"
+
+# TTL del delta incremental — independiente de CACHE_TTL_SEC (1 hora).
+# Usa AUTO_REFRESH_SEC (5 min) para que el delta se renueve con frecuencia
+# y refleje el operativo de campo en tiempo real, mientras la carga
+# completa (_load_full) sigue refrescándose solo cada hora.
+DELTA_TTL_SEC = AUTO_REFRESH_SEC
 
 
 # ── Normalización de nombres ───────────────────────────────────────────────────
@@ -277,12 +283,19 @@ def _load_full(api_key: str) -> tuple[pd.DataFrame, float]:
     return df, time.time()
 
 
-@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def _load_delta(api_key: str, desde_ts: float) -> tuple[pd.DataFrame, float]:
+@st.cache_data(ttl=DELTA_TTL_SEC, show_spinner=False)
+def _load_delta(api_key: str, desde_ts: float, _bucket: int) -> tuple[pd.DataFrame, float]:
     """
-    Carga incremental desde `desde_ts` (Unix timestamp).
-    También cacheada globalmente — solo llama a Bubble cuando su propio
-    caché expira, evitando llamadas redundantes entre sesiones.
+    Carga incremental desde `desde_ts` (Unix timestamp, snapshot real de la
+    última carga completa — usado para la consulta a Bubble).
+
+    `_bucket` es un parámetro de cache-busting: un entero que avanza cada
+    DELTA_TTL_SEC segundos (independiente de CACHE_TTL_SEC, que es de 1 hora).
+    Sin él, mientras `_load_full` no expire, `desde_ts` permanece constante
+    y esta función cachearía el MISMO resultado durante toda la hora —
+    congelando el delta y ocultando todo lo capturado en campo después de
+    la primera llamada del ciclo. `_bucket` fuerza una clave de caché nueva
+    cada DELTA_TTL_SEC segundos, garantizando llamadas periódicas a Bubble.
     """
     desde_dt = datetime.fromtimestamp(desde_ts, tz=timezone.utc)
     raw      = _fetch_delta_raw(api_key, desde_dt)
@@ -317,8 +330,11 @@ def get_encuestas(
         df_base, ts_base = _load_full(api_key)
 
         # Intentar delta para capturar registros llegados desde la última carga completa.
-        # Si _load_delta también está en caché, no hay llamada a Bubble.
-        df_delta, ts_delta = _load_delta(api_key, ts_base)
+        # `bucket` avanza cada DELTA_TTL_SEC segundos — fuerza una clave de
+        # caché nueva periódicamente para que el delta no quede congelado
+        # mientras _load_full siga vigente (ver docstring de _load_delta).
+        bucket = int(time.time() // DELTA_TTL_SEC)
+        df_delta, ts_delta = _load_delta(api_key, ts_base, bucket)
 
         if not df_delta.empty:
             df    = _merge_delta(df_base, df_delta)
@@ -386,7 +402,7 @@ if __name__ == "__main__":
     print(f"Municipios    : {sorted(df['municipio'].dropna().unique().tolist())}")
 
     print("\n── Delta simulado (desde hace 30 min) ───────────")
-    df_d, _ = bc._load_delta(API_KEY, time.time() - 1800)
+    df_d, _ = bc._load_delta(API_KEY, time.time() - 1800, 0)
     print(f"Registros delta: {len(df_d)}")
 
     print("\n✅ Prueba completada.")
