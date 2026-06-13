@@ -164,7 +164,7 @@ DATA_DIR = Path(__file__).parent / "data" / "geojsons"
 # Rol municipal: pasa lista → Bubble filtra en origen
 _filtro_munis = None if _rol == "estatal" else _munis_permitidos
 with st.spinner("Cargando datos del operativo…"):
-    df_raw, ultima_actualizacion = get_encuestas(API_KEY, municipios=_filtro_munis)
+    df_raw, ultima_actualizacion, _carga_info = get_encuestas(API_KEY, municipios=_filtro_munis)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -411,6 +411,10 @@ df = df[(df["fecha"] >= f_ini) & (df["fecha"] <= f_fin)]
 if enc_sel != "Todos":
     df = df[df["encuestador_nombre"] == enc_sel]
 
+
+# ── Banner de degradación (sanity check anti-Bubble-throttling) ───────────────
+if _carga_info.get("degradado"):
+    st.warning(f"⚠️ {_carga_info['mensaje']}")
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 titulo_geo = muni_sel if muni_sel != "Todos los municipios" else "Estado de Guerrero"
