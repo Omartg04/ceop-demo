@@ -105,6 +105,10 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
        total de la tabla sin filtros y no sirve para calcular páginas).
     3. Lanza todas las páginas restantes en paralelo (MAX_WORKERS hilos).
     4. Reensambla en orden de cursor para reproducibilidad.
+    5. Deduplica por _id — bajo escritura concurrente el offset por cursor
+       puede devolver el mismo registro en páginas distintas (o, más raro,
+       saltarse uno). La dedup por _id corrige duplicados; los huecos no
+       se pueden corregir desde aquí, pero se loguean para diagnóstico.
 
     Con 29K registros y 10 hilos: ~25-40 seg en red celular vs ~4 min en serie.
     """
@@ -115,18 +119,28 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
         BUBBLE_ENDPOINT,
         headers=headers,
         params={"limit": BUBBLE_PAGE_SIZE, "cursor": 0, "constraints": json.dumps(constraints)},
-        timeout=15,
+        timeout=30,
     )
     resp0.raise_for_status()
     body0     = resp0.json().get("response", {})
     results   = body0.get("results", [])
     remaining = body0.get("remaining", 0)
+    count0    = body0.get("count", len(results))
     total_est = len(results) + remaining
 
-    print(f"  Bubble: {len(results)}/{total_est} registros...", flush=True)
+    logger.info(
+        "Bubble cursor=0: count=%s remaining=%s len(results)=%s total_est=%s constraints=%s",
+        count0, remaining, len(results), total_est, constraints,
+    )
+    print(
+        f"  Bubble cursor=0: count={count0} remaining={remaining} "
+        f"len(results)={len(results)} total_est={total_est}",
+        flush=True,
+    )
 
     if remaining == 0:
         return results
+
 
     # — Cursores restantes basados en remaining —
     cursors = list(range(BUBBLE_PAGE_SIZE, total_est, BUBBLE_PAGE_SIZE))
@@ -142,11 +156,43 @@ def _fetch_pages(api_key: str, constraints: list[dict]) -> list[dict]:
             cursor, page_results = future.result()
             pages[cursor] = page_results
 
-    print(f"  Bubble: {total_est}/{total_est} registros OK", flush=True)
+    # — Diagnóstico: páginas que volvieron vacías cuando se esperaban resultados —
+    paginas_vacias = [c for c in cursors if not pages.get(c)]
+    if paginas_vacias:
+        logger.warning(
+            "Bubble: %d/%d páginas vacías (cursores: %s%s)",
+            len(paginas_vacias), len(cursors),
+            paginas_vacias[:10], "..." if len(paginas_vacias) > 10 else "",
+        )
 
     # — Reensamble en orden —
     for cursor in sorted(pages.keys()):
         results.extend(pages[cursor])
+
+    # — Dedup por _id ──────────────────────────────────────────────────────
+    # Bajo escritura concurrente, el offset por cursor puede devolver el
+    # mismo registro en más de una página. Sin esto, _fetch_all_raw podía
+    # producir totales inestables entre llamadas.
+    antes = len(results)
+    dedup: dict[str, dict] = {}
+    for r in results:
+        rid = r.get("_id")
+        if rid:
+            dedup[rid] = r
+    results = list(dedup.values())
+    despues = len(results)
+
+    logger.info(
+        "Bubble cursor=0: total_est=%d · descargados=%d · tras dedup=%d "
+        "(duplicados removidos=%d, páginas vacías=%d)",
+        total_est, antes, despues, antes - despues, len(paginas_vacias),
+    )
+    print(
+        f"  Bubble: total_est={total_est} descargados={antes} "
+        f"tras_dedup={despues} duplicados={antes - despues} "
+        f"paginas_vacias={len(paginas_vacias)}",
+        flush=True,
+    )
 
     return results
 
