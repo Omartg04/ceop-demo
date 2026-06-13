@@ -305,13 +305,20 @@ def _load_delta(api_key: str, desde_ts: float, _bucket: int) -> tuple[pd.DataFra
 
 # ── Función pública ────────────────────────────────────────────────────────────
 
+# Margen de tolerancia para considerar una caída "menor" (ruido de timing
+# entre _load_full y _load_delta, no degradación real de Bubble).
+_SANITY_MARGIN = 0.90
+
+
 def get_encuestas(
     api_key: str,
     municipios: list[str] | None = None,
     force_refresh: bool = False,
-) -> tuple[pd.DataFrame, datetime | None]:
+) -> tuple[pd.DataFrame, datetime | None, dict]:
     """
-    Retorna (df, ultima_actualizacion).
+    Retorna (df, ultima_actualizacion, info).
+
+    info = {"degradado": bool, "mensaje": str | None}
 
     Estrategia de carga:
     1. Sin caché → carga completa (_load_full).
@@ -321,6 +328,20 @@ def get_encuestas(
     4. force_refresh=True → invalida ambos cachés y fuerza carga completa.
 
     El filtro por municipio se aplica en memoria — no genera llamadas extra.
+
+    ── Salvaguarda anti-degradación ────────────────────────────────────────
+    En este dominio el total de encuestas NUNCA decrece (los registros no
+    se borran). Si Bubble responde de forma degradada (rate limit, timeout
+    parcial, hiccup) puede devolver un `results` truncado con `remaining=0`,
+    que _fetch_pages interpreta erróneamente como "esa es toda la data".
+    Para blindar contra esto:
+      - Se guarda en st.session_state el último dataset "bueno" (estatal,
+        sin filtrar por municipio) y su tamaño.
+      - Si el nuevo total es menor que el último bueno conocido (con un
+        margen de _SANITY_MARGIN para absorber ruido de timing), se
+        descarta el resultado nuevo, se limpian los cachés (para reintentar
+        en el siguiente ciclo) y se devuelve el último dataset bueno con
+        `info["degradado"] = True`.
     """
     if force_refresh:
         _load_full.clear()
@@ -344,19 +365,69 @@ def get_encuestas(
             ts_ok = ts_base
 
     except Exception as e:
-        logger.warning("Error cargando desde Bubble: %s. Devolviendo DataFrame vacío.", e)
+        logger.warning("Error cargando desde Bubble: %s.", e)
+        last_df = st.session_state.get("_ceop_last_good_df")
+        last_ts = st.session_state.get("_ceop_last_good_ts")
+        if last_df is not None:
+            info = {
+                "degradado": True,
+                "mensaje": (
+                    "No se pudo conectar a Bubble. Mostrando el último "
+                    "dato confiable disponible."
+                ),
+            }
+            df_out = last_df
+            if municipios:
+                munis_upper = [m.strip().upper() for m in municipios]
+                df_out = df_out[df_out["municipio"].isin(munis_upper)].copy()
+            return df_out, _ts_to_dt(last_ts), info
+
         return (
             pd.DataFrame(columns=list(FIELD_MAP.values()) + [
                 "duracion_min", "fecha", "encuestador_id", "terminada",
             ]),
             None,
+            {"degradado": True, "mensaje": "No se pudo conectar a Bubble y no hay datos previos en esta sesión."},
         )
+
+    # ── Sanity check anti-degradación (sobre el dataset estatal completo) ──
+    info = {"degradado": False, "mensaje": None}
+    last_good_count = st.session_state.get("_ceop_last_good_count", 0)
+    nuevo_count      = len(df)
+
+    if last_good_count > 0 and nuevo_count < last_good_count * _SANITY_MARGIN:
+        # Respuesta degradada de Bubble — descartar y mantener el último dato bueno.
+        logger.warning(
+            "Carga degradada detectada: %d registros nuevos vs %d últimos buenos. "
+            "Descartando y reintentando en el próximo ciclo.",
+            nuevo_count, last_good_count,
+        )
+        _load_full.clear()
+        _load_delta.clear()
+
+        last_df = st.session_state.get("_ceop_last_good_df")
+        last_ts = st.session_state.get("_ceop_last_good_ts")
+        info = {
+            "degradado": True,
+            "mensaje": (
+                f"Bubble devolvió una respuesta incompleta ({nuevo_count:,} "
+                f"de {last_good_count:,} registros esperados). Mostrando el "
+                f"último dato confiable."
+            ),
+        }
+        df    = last_df if last_df is not None else df
+        ts_ok = last_ts if last_ts is not None else ts_ok
+    else:
+        # Dataset bueno — actualizar el respaldo de sesión.
+        st.session_state["_ceop_last_good_df"]    = df
+        st.session_state["_ceop_last_good_count"] = nuevo_count
+        st.session_state["_ceop_last_good_ts"]    = ts_ok
 
     if municipios:
         munis_upper = [m.strip().upper() for m in municipios]
         df = df[df["municipio"].isin(munis_upper)].copy()
 
-    return df, _ts_to_dt(ts_ok)
+    return df, _ts_to_dt(ts_ok), info
 
 
 def _ts_to_dt(ts: float | None) -> datetime | None:
@@ -388,17 +459,18 @@ if __name__ == "__main__":
         return decorator
 
     import bubble_connector as bc
-    bc.st = types.SimpleNamespace(cache_data=_mock_cache)
+    bc.st = types.SimpleNamespace(cache_data=_mock_cache, session_state={})
     bc._load_full  = _mock_cache()(bc._load_full.__wrapped__)
     bc._load_delta = _mock_cache()(bc._load_delta.__wrapped__)
 
     print("── Carga completa ───────────────────────────────")
-    df, ts = bc.get_encuestas(API_KEY)
+    df, ts, info = bc.get_encuestas(API_KEY)
     total      = len(df)
     terminadas = int(df["terminada"].sum()) if total else 0
     print(f"Registros     : {total}")
     print(f"Terminadas    : {terminadas} ({terminadas/total*100:.1f}%)" if total else "Sin registros")
     print(f"Última act.   : {ts}")
+    print(f"Degradado     : {info['degradado']} ({info['mensaje']})")
     print(f"Municipios    : {sorted(df['municipio'].dropna().unique().tolist())}")
 
     print("\n── Delta simulado (desde hace 30 min) ───────────")
